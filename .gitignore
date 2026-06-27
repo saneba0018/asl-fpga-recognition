@@ -1,0 +1,27 @@
+# --- Vivado (fichiers régénérables) ---
+*.jou
+*.log
+*.str
+*.dcp
+.Xil/
+*.cache/
+*.hw/
+*.ip_user_files/
+*.runs/
+*.sim/
+*.gen/
+# Projet Vivado : non versionné, recréé via script Tcl
+*.xpr
+
+# --- ESP32 / PlatformIO ---
+.pio/
+firmware/build/
+
+# --- Python / ML ---
+__pycache__/
+*.pyc
+.venv/
+
+# --- OS ---
+.DS_Store
+Thumbs.db
