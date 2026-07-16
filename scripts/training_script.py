@@ -28,7 +28,7 @@ import kagglehub
 from sklearn.preprocessing import LabelBinarizer
 import tensorflow_model_optimization as tfmot
 
-OUT = "final_export" #folder des sorties 
+OUT = "training/final_export" #folder des sorties, relatif a la racine du repo (comme export_params.py)
 EVAL, BATCH, CALIB_N,SEED = 20, 128, 300, 2
 keras.utils.set_random_seed(SEED)
 
@@ -68,10 +68,15 @@ def build_model(xtr, ytr, xte, yte):
         layers.MaxPooling2D(2, name="pool2"),
         layers.Flatten(name="flat"),
         layers.Dense(32, activation='relu', name="dense1"),
-        layers.Dense(24, activation='softmax', name="dense2")
+        # pas d'activation: dense2 sort les logits bruts, comme le RTL
+        # (clamp_min=-128) et le protocole SPI (24 logits int8); le softmax
+        # vit dans la loss (from_logits=True), argmax cote hote
+        layers.Dense(24, name="dense2")
     ], name="asl_cnn")
-    
-    model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+
+    model.compile(optimizer='adam',
+                  loss=keras.losses.CategoricalCrossentropy(from_logits=True),
+                  metrics=['accuracy'])
 
     print("start model training...")
 
@@ -86,7 +91,9 @@ def build_model(xtr, ytr, xte, yte):
 def quant_aware_model(model, xtr, ytr, xte, yte):
     quantize_model = tfmot.quantization.keras.quantize_model
     q_aware_model = quantize_model(model)
-    q_aware_model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+    q_aware_model.compile(optimizer='adam',
+                          loss=keras.losses.CategoricalCrossentropy(from_logits=True),
+                          metrics=['accuracy'])
     q_aware_model.summary()
     
     q_aware_model.fit(xtr, ytr, batch_size=BATCH, epochs=4, validation_data=(xte, yte))
@@ -133,76 +140,18 @@ def evaluate_tflite_model(tflite_model, xte, yte):
     accuracy = correct_predictions / len(xte)
     print("TFLite int8 model accuracy:", accuracy)
 
-# inspection du modele TFLite pour voir les operations et les tensors afin
-# de pouvoir map valeurs sur fpga .mem
-def inspect_model(model):
-    interpreter = tf.lite.Interpreter(model_content=model)
-    interpreter.allocate_tensors()
-
-# ordre des operations dans le modele TFLite
-    for op in interpreter._get_ops_details():
-        print("Op index:", op['index'])
-        print("Operator:", op['op_name'])
-        print("Inputs:", op['inputs'])
-        print("Outputs:", op['outputs'])
-        print()
-
-    print ("-" * 40)
-
-# chaque tensor dans le modele TFLite
-    for tensor in interpreter.get_tensor_details():
-        qp = tensor["quantization_parameters"]
-        n_scale = len(qp["scales"])
-        print(f'{tensor["index"]:>3}  {tensor["dtype"].__name__:<7} {str(tensor["shape"]):<18} '
-              f'scales={n_scale} zp={qp["zero_points"][:1]}  {tensor["name"]}')
 
 
-# Exporter les poids et biais du modele TFLite en fichiers .mem pour importation dans Cmod A7-35T
-# À noter que les fichiers .mem sont en format hexadécimal et que les poids sont en int8 et les biais en int32
-# TODO: voir si il y a une façon plus simple d'exporter les fichiers .mem pour Cmod A7-35T
-def export_mem_files(model, output_dir):
-    interpreter = tf.lite.Interpreter(model_content=model)
-    interpreter.allocate_tensors()
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-
-    conv_i = fc_i = 0
-    for op in interpreter._get_ops_details():
-        if op['op_name'] == 'CONV_2D':
-            conv_i += 1
-            label = f"conv{conv_i}"
-        elif op['op_name'] == 'FULLY_CONNECTED':
-            fc_i += 1
-            label = f"dense{fc_i}"
-        else:
-            continue  # skip activations, pooling, reshape, softmax, etc.
-
-        ins = list(op['inputs'])
-        w = interpreter.get_tensor(ins[1])                       # int8 weights
-        if len(ins) > 2 and ins[2] != -1:
-            b = interpreter.get_tensor(ins[2])                   # int32 bias
-        else:
-            b = np.zeros((w.shape[0],), dtype=np.int32)          # bias dropped by TFLite
-
-        # TODO: Comment exporter les fichiers .mem dans Cmod A7-35T de façon facile??? 
-        np.savetxt(os.path.join(output_dir, f"{label}_w.mem"),
-                   w.flatten().view(np.uint8), fmt='%02x',
-                   header='// ' + str(tuple(w.shape)) + '  int8 weights, C-order [out,kh,kw,in]', comments='')
-        np.savetxt(os.path.join(output_dir, f"{label}_b.mem"),
-                   b.flatten().view(np.uint32), fmt='%08x',
-                   header='// ' + str(tuple(b.shape)) + '  int32 bias', comments='')
-        print(f"  {label}: weights {tuple(w.shape)} -> {label}_w.mem | bias {tuple(b.shape)} -> {label}_b.mem")
 
     
 def main():
+    os.makedirs(OUT, exist_ok=True)  # sinon open() crash apres 24 epochs
     xtr, ytr, xte, yte = load_data()
     model = build_model(xtr, ytr, xte, yte)
     q_aware_model = quant_aware_model(model, xtr, ytr, xte, yte)
     compare_models(model, q_aware_model, xte, yte)
     tflite_model = convert_to_tflite(q_aware_model, os.path.join(OUT, "asl_cnn_qaware.tflite"))
     evaluate_tflite_model(tflite_model, xte, yte)
-    inspect_model(tflite_model)
-    export_mem_files(tflite_model, OUT)
 
 if __name__ == "__main__":
     main()
