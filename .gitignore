@@ -101,5 +101,4 @@ xvlog.*
 *.dcp
 
 ############# documents
-
-./docs/*
+docs/*
