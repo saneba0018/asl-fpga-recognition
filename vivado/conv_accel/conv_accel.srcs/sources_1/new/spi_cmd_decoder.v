@@ -135,25 +135,25 @@ module spi_cmd_decoder (
                         state <= S_IGNORE;
                 end
 
-S_TX_RESULT: if (rx_dv) begin
-    if (!dummy_sent) begin
-        tx_byte    <= result_rd_data;
-        tx_dv      <= 1;
-        dummy_sent <= 1;
-        result_rd_addr <= 1;
-        byte_cnt   <= 1;
-    end else begin
-        if (byte_cnt == RES_SIZE - 1) begin
-            state      <= S_IGNORE;
-            done_latch <= 0;
-        end else begin
-            tx_byte        <= result_rd_data;
-            tx_dv          <= 1;
-            result_rd_addr <= byte_cnt + 1;
-            byte_cnt       <= byte_cnt + 1;
-        end
-    end
-end
+                S_TX_RESULT: if (rx_dv) begin
+                    if (!dummy_sent) begin
+                        tx_byte        <= result_rd_data;
+                        tx_dv          <= 1;
+                        dummy_sent     <= 1;
+                        result_rd_addr <= 1;
+                        byte_cnt       <= 1;
+                    end else begin
+                        tx_byte        <= result_rd_data;
+                        tx_dv          <= 1;
+                        result_rd_addr <= byte_cnt + 1;
+                        byte_cnt       <= byte_cnt + 1;
+
+                        if (byte_cnt == RES_SIZE - 1) begin
+                            state      <= S_IGNORE;
+                            done_latch <= 0;
+                        end
+                    end
+                end
 
                 S_TX_STATUS: if (rx_dv) begin
                     if (!dummy_sent) begin

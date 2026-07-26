@@ -1,4 +1,15 @@
 `timescale 1ns/1ps
+//-----------------------------------------------------------------------------
+// tb_spi_cmd_decoder - banc de test avec verifications automatiques
+//
+// TEST 1 : START_CONV genere un pulse start
+// TEST 2 : SEND_IMAGE ecrit les octets aux bonnes adresses
+// TEST 3 : GET_STATUS emet {busy, done_latch, 6'b0}
+// TEST 4 : READ_RESULT emet les 24 logits complets  <-- detecte le bug du 24e
+// TEST 5 : START_CONV est ignore pendant busy
+//
+// Verdict automatique en fin de simulation. Watchdog integre.
+//-----------------------------------------------------------------------------
 
 module tb_spi_cmd_decoder;
 
@@ -19,10 +30,13 @@ module tb_spi_cmd_decoder;
     reg  [7:0] result_rd_data;
     wire       o_ready;
 
+    integer errors = 0;
+
     // horloge 100 MHz
     always #5 clk = ~clk;
 
-    // result_buf simulé : classe k retourne 8'hA0 + k
+    // result_buf simule : classe k retourne 8'hA0 + k (combinatoire, comme le
+    // vrai result_buf devra l'etre - voir note en bas de fichier)
     always @(*) result_rd_data = 8'hA0 + result_rd_addr;
 
     spi_cmd_decoder dut (
@@ -35,7 +49,54 @@ module tb_spi_cmd_decoder;
         .o_ready(o_ready)
     );
 
-    // envoie un octet reçu (simule un pulse rx_dv du spi_slave)
+    //-------------------------------------------------------------------------
+    // Mouchards : capturent ce que le DUT produit, pour verification differee
+    //-------------------------------------------------------------------------
+    reg        cap_en   = 0;
+    integer    n_tx     = 0;      // nombre d'octets emis
+    reg [7:0]  tx_log [0:63];     // octets emis
+    integer    n_start  = 0;      // nombre de pulses start
+    integer    n_wr     = 0;      // nombre d'ecritures image
+    reg [9:0]  wr_addr_log [0:15];
+    reg [7:0]  wr_data_log [0:15];
+
+    always @(posedge clk) begin
+        if (cap_en) begin
+            if (tx_dv) begin
+                if (n_tx < 64) tx_log[n_tx] = tx_byte;
+                n_tx = n_tx + 1;
+            end
+            if (start) n_start = n_start + 1;
+            if (img_wr_en) begin
+                if (n_wr < 16) begin
+                    wr_addr_log[n_wr] = img_wr_addr;
+                    wr_data_log[n_wr] = img_wr_data;
+                end
+                n_wr = n_wr + 1;
+            end
+        end
+    end
+
+    task reset_mouchards();
+        begin
+            n_tx = 0; n_start = 0; n_wr = 0;
+        end
+    endtask
+
+    task check(input condition, input [511:0] libelle);
+        begin
+            if (condition) begin
+                $display("    OK   : %0s", libelle);
+            end else begin
+                $display("    ECHEC: %0s", libelle);
+                errors = errors + 1;
+            end
+        end
+    endtask
+
+    //-------------------------------------------------------------------------
+    // Stimuli
+    //-------------------------------------------------------------------------
     task send_byte(input [7:0] b);
         begin
             @(posedge clk); rx_byte <= b; rx_dv <= 1;
@@ -43,7 +104,6 @@ module tb_spi_cmd_decoder;
         end
     endtask
 
-    // termine une trame : laisse un cycle pour traiter le dernier octet puis remonte cs_n
     task end_frame();
         begin
             @(posedge clk);
@@ -53,20 +113,44 @@ module tb_spi_cmd_decoder;
         end
     endtask
 
+    //-------------------------------------------------------------------------
+    // Watchdog : evite une simulation qui tourne indefiniment
+    //-------------------------------------------------------------------------
     initial begin
-        // reset
+        #200000;
+        $display("");
+        $display("ERREUR FATALE : watchdog declenche, la simulation ne s'est");
+        $display("                pas terminee dans le temps imparti.");
+        $finish;
+    end
+
+    //-------------------------------------------------------------------------
+    // Scenario
+    //-------------------------------------------------------------------------
+    integer i;
+
+    initial begin
+        $display("");
+        $display("=== tb_spi_cmd_decoder ===");
+        cap_en = 1;
+
         #20 rst = 0;
         #20;
 
         // ===== TEST 1 : START_CONV =====
-        $display("[T=%0t] TEST 1 : START_CONV", $time);
+        $display("");
+        $display("TEST 1 : START_CONV");
+        reset_mouchards();
         cs_n = 0;
         send_byte(8'h03);
         end_frame();
         #20;
+        check(n_start == 1, "un seul pulse start genere");
 
-        // ===== TEST 2 : SEND_IMAGE (3 octets pour vérifier) =====
-        $display("[T=%0t] TEST 2 : SEND_IMAGE", $time);
+        // ===== TEST 2 : SEND_IMAGE =====
+        $display("");
+        $display("TEST 2 : SEND_IMAGE (3 octets)");
+        reset_mouchards();
         cs_n = 0;
         send_byte(8'h02);  // CMD
         send_byte(8'hAA);  // pixel 0
@@ -74,45 +158,83 @@ module tb_spi_cmd_decoder;
         send_byte(8'hCC);  // pixel 2
         end_frame();
         #20;
+        check(n_wr == 3, "3 ecritures image");
+        check(wr_addr_log[0] == 0 && wr_data_log[0] == 8'hAA, "pixel 0 : addr=0 data=AA");
+        check(wr_addr_log[1] == 1 && wr_data_log[1] == 8'hBB, "pixel 1 : addr=1 data=BB");
+        check(wr_addr_log[2] == 2 && wr_data_log[2] == 8'hCC, "pixel 2 : addr=2 data=CC");
 
         // ===== TEST 3 : GET_STATUS =====
-        $display("[T=%0t] TEST 3 : GET_STATUS", $time);
+        // busy=0 et done_latch=0 (efface par le START_CONV du test 1)
+        $display("");
+        $display("TEST 3 : GET_STATUS");
+        reset_mouchards();
         cs_n = 0;
         send_byte(8'h05);  // CMD
         send_byte(8'h00);  // dummy
         end_frame();
         #20;
+        check(n_tx == 1, "un seul octet de statut emis");
+        check(tx_log[0] == 8'h00, "statut = 0x00 (ni busy ni done)");
 
-// ===== TEST 4 : READ_RESULT (24 logits complets) =====
-$display("[T=%0t] TEST 4 : READ_RESULT", $time);
-cs_n = 0;
-send_byte(8'h04);  // CMD
-send_byte(8'h00);  // dummy
-begin : read_loop
-    integer i;
-    for (i = 0; i < 24; i = i + 1) send_byte(8'h00);
-end
-end_frame();
-#20;
+        // ===== TEST 4 : READ_RESULT - le test qui attrape le bug =====
+        // Trame reelle : CMD + 25 dummies = 26 octets.
+        // Le decodeur doit emettre 24 octets : 0xA0 .. 0xB7
+        $display("");
+        $display("TEST 4 : READ_RESULT (24 logits)");
+        reset_mouchards();
+        cs_n = 0;
+        send_byte(8'h04);              // CMD
+        for (i = 0; i < 25; i = i + 1)
+            send_byte(8'h00);          // 25 dummies
+        end_frame();
+        #20;
 
-        // ===== TEST 5 : START_CONV ignoré pendant busy =====
-        $display("[T=%0t] TEST 5 : START_CONV pendant busy", $time);
+        check(n_tx == 24, "exactement 24 octets emis");
+
+        for (i = 0; i < 24; i = i + 1) begin
+            if (i < n_tx && tx_log[i] !== (8'hA0 + i)) begin
+                $display("    ECHEC: logit %0d = %h, attendu %h",
+                         i, tx_log[i], 8'hA0 + i);
+                errors = errors + 1;
+            end
+        end
+        if (n_tx == 24)
+            check(tx_log[23] == 8'hB7, "dernier logit = 0xB7 (le 24e n'est pas perdu)");
+
+        // ===== TEST 5 : START_CONV ignore pendant busy =====
+        $display("");
+        $display("TEST 5 : START_CONV pendant busy");
+        reset_mouchards();
         busy = 1;
         cs_n = 0;
         send_byte(8'h03);
         end_frame();
         busy = 0;
         #20;
+        check(n_start == 0, "aucun pulse start pendant busy");
 
-        $display("[T=%0t] Fin", $time);
+        // ===== Verdict =====
+        $display("");
+        $display("==========================================");
+        if (errors == 0)
+            $display("  RESULTAT : TOUS LES TESTS PASSENT");
+        else
+            $display("  RESULTAT : %0d ERREUR(S)", errors);
+        $display("==========================================");
+        $display("");
         $finish;
     end
 
-    // observateurs
-    always @(posedge clk) begin
-        if (start)     $display("[T=%0t]   -> START pulse", $time);
-        if (img_wr_en) $display("[T=%0t]   -> IMG WRITE addr=%0d data=%h", $time, img_wr_addr, img_wr_data);
-        if (tx_dv)     $display("[T=%0t]   -> TX byte=%h", $time, tx_byte);
-    end
-
 endmodule
+
+//-----------------------------------------------------------------------------
+// NOTE POUR L'IMPLEMENTATION DE result_buf
+//
+// Le decodeur lit result_rd_data dans le MEME cycle ou il positionne
+// result_rd_addr. result_buf doit donc etre COMBINATOIRE (banc de registres),
+// pas une BRAM a lecture synchrone comme act_ram.
+//
+// Avec une lecture synchrone, tous les logits sortiraient decales d'un cran
+// et le 24e manquerait a nouveau. Pour 24 octets, un banc de registres est
+// de toute facon le bon choix.
+//-----------------------------------------------------------------------------
