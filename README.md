@@ -18,3 +18,29 @@ Système de reconnaissance en temps réel de l'alphabet manuel ASL (24 lettres s
 
 ## Équipe
 
+## How to Run
+
+### FPGA Setup (Vivado)
+
+
+### Software Setup (Arduino IDE)
+
+1. Install the ESP32 board package.
+
+
+### Folder Structure 
+<pre>
+spi-fpga-alu/
+├── hdl/
+│   ├── s
+│   ├── 
+│   ├──
+│   └──
+├── tb/
+│   └── 
+├── constraints/
+│   └── r.xdc      # FPGA pin constraints
+├── docs/
+│   
+└── README.md
+</pre>
