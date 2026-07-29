@@ -76,6 +76,7 @@ module SPI_Slave
   reg r_RX_Done, r2_RX_Done, r3_RX_Done;
   reg [7:0] r_TX_Byte;
   reg r_SPI_MISO_Bit, r_Preload_MISO;
+  reg [7:0] r_TX_Shift;
 
   // CPOL: Clock Polarity
   // CPOL=0 means clock idles at 0, leading edge is rising edge.
@@ -172,30 +173,52 @@ module SPI_Slave
 
 
   // Purpose: Transmits 1 SPI Byte whenever SPI clock is toggling
-  // Will transmit read data back to SW over MISO line.
-  // Want to put data on the line immediately when CS goes low.
-  always @(posedge w_SPI_Clk or posedge i_SPI_CS_n)
+  //
+  // CORRECTIF 2026-07-27 (projet ASL) - registre a decalage instantane
+  // ------------------------------------------------------------------
+  // La version precedente indexait r_TX_Byte en direct. Or r_TX_Byte est
+  // reecrit par i_TX_DV environ 5 cycles i_Clk apres chaque frontiere
+  // d'octet, c'est-a-dire EN PLEIN milieu de l'octet en cours d'emission.
+  // Resultat : chaque octet emis portait le bit 7 de la valeur precedente
+  // et les bits 6:0 de la suivante.
+  //
+  // Correctif : prendre un instantane de r_TX_Byte a chaque frontiere
+  // d'octet (r_TX_Shift) et decaler CELUI-LA. r_TX_Byte peut alors etre
+  // reecrit a tout moment sans perturber l'octet en vol.
+  //
+  // CORRECTIF 2 - bascule sur front DESCENDANT
+  // En mode 0 l'esclave doit changer MISO sur le front descendant, pour que
+  // la donnee soit stable une demi-periode avant que le maitre ne l'echan-
+  // tillonne au front montant. L'original utilisait posedge : MISO changeait
+  // a l'instant meme ou le maitre lisait. En simulation l'affectation non
+  // bloquante masquait la course ; sur materiel l'ESP32 echantillonne
+  // quelques nanosecondes apres le front et capturait le bit SUIVANT, d'ou
+  // un flux decale d'un bit.
+  // ------------------------------------------------------------------
+  always @(negedge w_SPI_Clk or posedge i_SPI_CS_n)
   begin
     if (i_SPI_CS_n)
     begin
-      r_TX_Bit_Count <= 3'b111;  // Send MSb first
-      r_SPI_MISO_Bit <= r_TX_Byte[3'b111];  // Reset to MSb
+      r_TX_Bit_Count <= 3'b111;
+      r_TX_Shift     <= r_TX_Byte;
+      r_SPI_MISO_Bit <= r_TX_Byte[3'b111];
     end
     else
     begin
       r_TX_Bit_Count <= r_TX_Bit_Count - 1;
 
-      // Here is where data crosses clock domains from i_Clk to w_SPI_Clk
-      // Can set up a timing constraint with wide margin for data path.
-      // FIX (2026-07, ASL project): index with the decremented count. The
-      // preload mux already presents bit 7 for the first bit period, so the
-      // shift register must supply bit 6 after the first clock edge. The
-      // original `r_TX_Byte[r_TX_Bit_Count]` re-sent bit 7 and dropped bit 0,
-      // shifting every reply right by one as seen by a mode-0 master.
-      r_SPI_MISO_Bit <= r_TX_Byte[r_TX_Bit_Count - 1'b1];
-
-    end // else: !if(i_SPI_CS_n)
-  end // always @ (negedge w_SPI_Clk or posedge i_SPI_CS_n_SW)
+      if (r_TX_Bit_Count == 3'b000)
+      begin
+        // frontiere d'octet : charger l'instantane suivant
+        r_TX_Shift     <= r_TX_Byte;
+        r_SPI_MISO_Bit <= r_TX_Byte[3'b111];
+      end
+      else
+      begin
+        r_SPI_MISO_Bit <= r_TX_Shift[r_TX_Bit_Count - 1'b1];
+      end
+    end
+  end
 
 
   // Purpose: Register TX Byte when DV pulse comes.  Keeps registed byte in
