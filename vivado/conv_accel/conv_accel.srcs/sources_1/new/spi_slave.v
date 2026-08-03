@@ -90,7 +90,14 @@ module SPI_Slave
   //              the "in" side captures data on the trailing edge of clock
   assign w_CPHA  = (SPI_MODE == 1) | (SPI_MODE == 3);
 
-  assign w_SPI_Clk = w_CPHA ? ~i_SPI_Clk : i_SPI_Clk;
+  reg r_SPI_Clk_Mux;
+
+  always @(*) begin
+    if (w_CPHA) r_SPI_Clk_Mux = ~i_SPI_Clk;
+    else r_SPI_Clk_Mux = i_SPI_Clk;
+  end
+
+  assign w_SPI_Clk = r_SPI_Clk_Mux;
 
 
 
@@ -240,9 +247,23 @@ module SPI_Slave
 
   // Preload MISO with top bit of send data when preload selector is high.
   // Otherwise just send the normal MISO data
-  assign w_SPI_MISO_Mux = r_Preload_MISO ? r_TX_Byte[3'b111] : r_SPI_MISO_Bit;
+  reg r_MISO_Mux;
+
+  always @(*) begin
+    if (r_Preload_MISO) r_MISO_Mux = r_TX_Byte[3'b111];
+    else r_MISO_Mux = r_SPI_MISO_Bit;
+  end
+
+  assign w_SPI_MISO_Mux = r_MISO_Mux;
 
   // Tri-state MISO when CS is high.  Allows for multiple slaves to talk.
-  assign o_SPI_MISO = i_SPI_CS_n ? 1'bZ : w_SPI_MISO_Mux;
+  reg r_MISO_Out;
+
+  always @(*) begin
+    if (i_SPI_CS_n) r_MISO_Out = 1'bZ;
+    else r_MISO_Out = w_SPI_MISO_Mux;
+  end
+
+  assign o_SPI_MISO = r_MISO_Out;
 
 endmodule // SPI_Slave

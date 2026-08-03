@@ -22,7 +22,7 @@ uint8_t spiTransferCommandWithResponse(uint8_t cmd) {
 
   txBuffer[0] = cmd;
 
-  SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
+  SPI.beginTransaction(SPISettings(SPI_HZ_READ, MSBFIRST, SPI_MODE0));
 
   digitalWrite(PIN_CS, LOW);
 
@@ -60,7 +60,7 @@ bool fpgaSendImage(const uint8_t *img) {
     txBuffer[i + 1] = img[i];
   }
 
-  SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
+  SPI.beginTransaction(SPISettings(SPI_HZ_WRITE, MSBFIRST, SPI_MODE0));
 
   digitalWrite(PIN_CS, LOW);
 
@@ -76,7 +76,7 @@ bool fpgaSendImage(const uint8_t *img) {
 }
 
 bool fpgaStart() {
-  SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
+  SPI.beginTransaction(SPISettings(SPI_HZ_WRITE, MSBFIRST, SPI_MODE0));
 
   digitalWrite(PIN_CS, LOW);
 
@@ -92,11 +92,20 @@ bool fpgaStart() {
 bool fpgaWaitDone(unsigned long timeoutMs) {
   unsigned long start = millis();
 
+  // Laisser busy monter avant de le sonder. START_CONV est decode pendant la
+  // trame SPI, mais o_ready ne retombe qu'ensuite : tester la GPIO tout de
+  // suite ferait conclure que l'inference est finie avant qu'elle commence.
+  while (fpgaIsReady() && (millis() - start) < 5) {
+    // attente active, quelques microsecondes en pratique
+  }
+
   while (millis() - start < timeoutMs) {
     if (fpgaIsReady()) {
       return true;
     }
 
+    // Repli si PIN_READY n'est pas cable : GET_STATUS reste accepte
+    // pendant busy, et done_latch n'est mis qu'a la fin de l'inference.
     uint8_t status = fpgaGetStatus();
 
     if (status & FPGA_STATUS_DONE) {
@@ -115,7 +124,7 @@ bool fpgaReadLogits(int8_t *logits) {
 
   txBuffer[0] = CMD_READ_RESULT;
 
-  SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
+  SPI.beginTransaction(SPISettings(SPI_HZ_READ, MSBFIRST, SPI_MODE0));
 
   digitalWrite(PIN_CS, LOW);
 
@@ -135,11 +144,23 @@ bool fpgaReadLogits(int8_t *logits) {
 }
 
 bool fpgaInfer(const uint8_t *img, int *idx, int *margin) {
+  return fpgaInferEx(img, idx, margin, NULL);
+}
+
+bool fpgaInferEx(const uint8_t *img, int *idx, int *margin, int8_t *logitsOut) {
   if (idx == NULL) {
     return false;
   }
 
   int8_t logits[FPGA_NUM_CLASS];
+
+  // Le decodeur ignore SEND_IMAGE, START_CONV et READ_RESULT pendant busy.
+  // Sans cette garde, l'image serait silencieusement jetee et le FPGA
+  // renverrait les logits de l'inference precedente.
+  if (!fpgaIsReady()) {
+    Serial.println("Erreur: FPGA occupe, inference ignoree");
+    return false;
+  }
 
   fpgaSendImage(img);
   fpgaStart();
@@ -150,6 +171,10 @@ bool fpgaInfer(const uint8_t *img, int *idx, int *margin) {
   }
 
   fpgaReadLogits(logits);
+
+  if (logitsOut != NULL) {
+    memcpy(logitsOut, logits, FPGA_NUM_CLASS);
+  }
 
   int best = 0;
   int second = 1;

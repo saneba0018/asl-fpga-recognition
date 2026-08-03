@@ -30,8 +30,8 @@ localparam integer CONV1_K = 3;
 localparam integer CONV1_WOFF = 0;
 localparam integer CONV1_OC_BASE = 0;
 localparam integer CONV1_ZP_IN = -128;
-localparam integer CONV1_ZP_OUT = -41;
-localparam integer CONV1_CLAMP_MIN = -41;  // ReLU fusionne = zp_out
+localparam integer CONV1_ZP_OUT = -83;
+localparam integer CONV1_CLAMP_MIN = -83;  // ReLU fusionne = zp_out
 
 //pool1
 localparam integer POOL1_H_IN = 26;
@@ -50,9 +50,9 @@ localparam integer CONV2_C_OUT = 64;
 localparam integer CONV2_K = 3;
 localparam integer CONV2_WOFF = 288;
 localparam integer CONV2_OC_BASE = 32;
-localparam integer CONV2_ZP_IN = -41;
-localparam integer CONV2_ZP_OUT = -81;
-localparam integer CONV2_CLAMP_MIN = -81;
+localparam integer CONV2_ZP_IN = -83;
+localparam integer CONV2_ZP_OUT = -114;
+localparam integer CONV2_CLAMP_MIN = -114;
 
 //pool2
 localparam integer POOL2_H_IN = 11;
@@ -67,9 +67,9 @@ localparam integer DENSE1_C_OUT = 32;
 localparam integer DENSE1_K = 1;
 localparam integer DENSE1_WOFF = 18720;
 localparam integer DENSE1_OC_BASE = 96;
-localparam integer DENSE1_ZP_IN = -81;
-localparam integer DENSE1_ZP_OUT = -114;
-localparam integer DENSE1_CLAMP_MIN = -114;
+localparam integer DENSE1_ZP_IN = -114;
+localparam integer DENSE1_ZP_OUT = -126;
+localparam integer DENSE1_CLAMP_MIN = -126;
 
 //dense2
 localparam integer DENSE2_C_IN = 32;
@@ -77,8 +77,8 @@ localparam integer DENSE2_C_OUT = 24;
 localparam integer DENSE2_K = 1;
 localparam integer DENSE2_WOFF = 69920;
 localparam integer DENSE2_OC_BASE = 128;
-localparam integer DENSE2_ZP_IN = -114;
-localparam integer DENSE2_ZP_OUT = 62;
+localparam integer DENSE2_ZP_IN = -126;
+localparam integer DENSE2_ZP_OUT = 44;
 localparam integer DENSE2_CLAMP_MIN = -128;  // logits bruts
 
 `endif

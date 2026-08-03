@@ -1,65 +1,155 @@
 #!/usr/bin/env python
 
 # Auteur: Felix Ouimet
-# 
+#
 # Script pour entrainer un modele CNN pour la reconnaissance de l'alphabet en langue des signes (ASL) avec Keras et Tensorflow
 # Exporte le modele en TFLite avec quantization post-training pour l'utiliser sur un FPGA
 # Cree fichiers .mem pour importer dans Cmod A7-35T
 #
+# Dataset: ASL Alphabet (grassknoted), ~3000 vraies photos 200x200 par lettre.
+# Remplace Sign Language MNIST: ce dernier est genere par augmentation d'un
+# petit nombre d'originaux, et le modele qui l'apprend ne generalise pas
+# (88% sur son propre jeu de test, 5.7% sur de vraies photos). On garde les
+# 24 lettres statiques (pas de J/Z).
+#
+# Points cles pour que l'entrainement colle au deploiement:
+# - meme pretraitement que l'ESP32: gris -> crop carre centre -> 28x28
+#   au plus proche voisin (crop_center_resize, copie de camera_preprocess.cpp)
+# - augmentation (rotation, translation, zoom, luminosite) pour la
+#   robustesse au cadrage et a l'eclairage de la camera
+# - PAS de miroir horizontal: l'ASL est chirale, un M inverse n'est pas un M
+# - evaluation finale sur un jeu HORS dataset (danrasband/asl-alphabet-test,
+#   autre auteur, autre camera): c'est le seul chiffre qui predit la
+#   performance devant la vraie camera
+#
+# Apres un retrain: relancer export_params.py (nouveaux .mem). Note:
+# ESP32/PROJET_ESP32/golden_image.h contient les logits de reference de
+# l'auto-test au boot; il n'est plus regenerable automatiquement, donc
+# l'auto-test echouera avec les anciens logits tant qu'il n'est pas mis a jour.
+#
 # References:
 # https://www.tensorflow.org/model_optimization/guide/quantization/training_example
-# https://www.tensorflow.org/model_optimization/guide/quantization/post_training 
-# https://www.tensorflow.org/lite/api_docs/python/tf/lite/Interpreter?hl=id 
+# https://www.tensorflow.org/model_optimization/guide/quantization/post_training
+# https://www.tensorflow.org/lite/api_docs/python/tf/lite/Interpreter?hl=id
 # https://developers.google.com/edge/litert/conversion/tensorflow/quantization/post_training_integer_quant
-# https://medium.com/@tushar.bzp05/building-a-real-time-asl-recognition-system-with-deep-learning-a-complete-tutorial-a72db4a4bdf1v
-# https://medium.com/data-science/sign-language-recognition-with-advanced-computer-vision-7b74f20f3442 
 # https://victorzhou.com/blog/keras-cnn-tutorial/
-# https://ieeexplore.ieee.org/abstract/document/10288799 
 import os
 os.environ["TF_USE_LEGACY_KERAS"] = "1"
 os.environ["KERAS_BACKEND"] = "tensorflow"
-import pandas as pd
-import glob, math
+import sys
+import glob
 import numpy as np
 import tensorflow as tf
 import tf_keras as keras
 from tf_keras import layers
+from tf_keras.preprocessing.image import ImageDataGenerator
 import kagglehub
-from sklearn.preprocessing import LabelBinarizer
+from PIL import Image
+from sklearn.model_selection import train_test_split
 import tensorflow_model_optimization as tfmot
 
-OUT = "training/final_export" #folder des sorties, relatif a la racine du repo (comme export_params.py)
-EVAL, BATCH, CALIB_N,SEED = 20, 128, 300, 2
+OUT = "training/final_export"  # folder des sorties, relatif a la racine du repo (comme export_params.py)
+CACHE = "training/asl_alphabet_28.npz"  # 28x28 pre-calcules (le decodage des 72k jpg est long)
+DATASET_TRAIN = "grassknoted/asl-alphabet"
+TESTSET_KAGGLE = "danrasband/asl-alphabet-test"  # jeu hors-dataset (autre auteur)
+OUT_W, OUT_H = 28, 28
+
+# Meme mapping que spi_comm.cpp (24 classes, pas de J ni Z: lettres en mouvement)
+LETTERS = "ABCDEFGHIKLMNOPQRSTUVWXY"
+
+BATCH, SEED = 128, 2
+EPOCHS, QAT_EPOCHS = 30, 6
 keras.utils.set_random_seed(SEED)
 
+
+# ---------------------------------------------------------------------------
+# Pretraitement: copie fidele de cropCenterAndResize (camera_preprocess.cpp).
+# Meme arithmetique entiere que le C, pour que le 28x28 vu a l'entrainement
+# soit identique bit a bit a celui produit par l'ESP32.
+# ---------------------------------------------------------------------------
+
+def crop_center_resize(src):
+    """Crop carre centre puis 28x28 au plus proche voisin."""
+    srcH, srcW = src.shape
+    crop = min(srcW, srcH)
+    cx = (srcW - crop) // 2
+    cy = (srcH - crop) // 2
+    ys = cy + (np.arange(OUT_H) * crop) // OUT_H
+    xs = cx + (np.arange(OUT_W) * crop) // OUT_W
+    return src[np.ix_(ys, xs)]
+
+
+def testset_dir():
+    """Jeu hors-dataset Kaggle (870 photos 200x200), telecharge si absent."""
+    cache = os.path.expanduser(
+        "~/.cache/kagglehub/datasets/danrasband/asl-alphabet-test/versions/1")
+    if not os.path.isdir(cache):
+        cache = kagglehub.dataset_download(TESTSET_KAGGLE)
+    return cache
+
+
+def load_images_by_letter(root):
+    """<root>/**/<LETTRE>/*.jpg -> x uint8 (N,28,28,1), y indices 0-23."""
+    xs, ys = [], []
+    for li, letter in enumerate(LETTERS):
+        files = sorted(glob.glob(os.path.join(root, "**", letter, "*.jpg"),
+                                 recursive=True))
+        if not files:
+            raise RuntimeError(f"aucune image pour la lettre {letter} sous {root}")
+        for p in files:
+            g = np.asarray(Image.open(p).convert("L"), dtype=np.uint8)
+            xs.append(crop_center_resize(g))
+        ys.extend([li] * len(files))
+        print(f"  {letter}: {len(files)} images")
+    return np.stack(xs)[..., np.newaxis], np.array(ys)
+
+
 def load_data():
+    if os.path.exists(CACHE):
+        print("cache:", CACHE)
+        d = np.load(CACHE)
+        x, y = d["x"], d["y"]
+    else:
+        dataset = kagglehub.dataset_download(DATASET_TRAIN)
+        print("dataset:", dataset)
+        x, y = load_images_by_letter(dataset)
+        os.makedirs(os.path.dirname(CACHE), exist_ok=True)
+        np.savez_compressed(CACHE, x=x, y=y)
+        print("cache ecrit:", CACHE)
 
-    # fetch csv dataset de Kagglehub (MINST ASL ALPHABET)
-    dataset = kagglehub.dataset_download("datamunge/sign-language-mnist")
-    print("dataset:", dataset)
-    train_path = glob.glob(os.path.join(dataset, "**", "*train*.csv"), recursive=True)[0]
-    test_path = glob.glob(os.path.join(dataset, "**", "*test*.csv"), recursive=True)[0]
-    
-    # load dans pandas
-    train_df = pd.read_csv(train_path)
-    test_df = pd.read_csv(test_path)
+    # split stratifie: le dataset n'a pas de jeu de test etiquete utilisable
+    xtr, xva, ytr, yva = train_test_split(
+        x, y, test_size=0.1, stratify=y, random_state=SEED)
+    ytr = keras.utils.to_categorical(ytr, len(LETTERS))
+    yva = keras.utils.to_categorical(yva, len(LETTERS))
+    print(f"train: {len(xtr)}  val: {len(xva)}")
+    return xtr, ytr, xva, yva
 
-    # separer les features et labels ensuite reshape et normaliser les features
-    xtr = train_df.drop(columns=["label"]).values.reshape(-1, 28, 28, 1) / 255.0
-    ytr = train_df["label"].values
-    xte = test_df.drop(columns=["label"]).values.reshape(-1, 28, 28, 1) / 255.0
-    yte = test_df["label"].values
 
-    # encoder les labels en one-hot encoding
-    lb = LabelBinarizer()
-    ytr = lb.fit_transform(ytr)
-    yte = lb.transform(yte)
+def load_out_of_dataset():
+    """Jeu hors-dataset (autre auteur, autre camera): le vrai juge."""
+    return load_images_by_letter(testset_dir())
 
-    return xtr, ytr, xte, yte
+
+# augmentation: simule les variations de cadrage/eclairage de la camera.
+# horizontal_flip reste OFF (chiralite ASL). rescale applique apres coup:
+# le reseau voit du [0,1] comme avant.
+def make_augmenter():
+    return ImageDataGenerator(
+        rescale=1.0 / 255.0,
+        rotation_range=15,
+        width_shift_range=0.12,
+        height_shift_range=0.12,
+        zoom_range=0.2,
+        shear_range=10,
+        brightness_range=(0.65, 1.35),
+        fill_mode="nearest")
+
 
 # architecture et entrainement du modele CNN avec Keras
+# (architecture inchangee: le RTL et export_params.py en dependent)
 
-def build_model(xtr, ytr, xte, yte):
+def build_model(xtr, ytr, xva, yva):
     model = keras.Sequential([
         layers.Input(shape=(28, 28, 1), name="img"),
         layers.Conv2D(32, 3, padding="valid", activation="relu", name="conv1"),
@@ -67,11 +157,14 @@ def build_model(xtr, ytr, xte, yte):
         layers.Conv2D(64, 3, padding="valid", activation="relu", name="conv2"),
         layers.MaxPooling2D(2, name="pool2"),
         layers.Flatten(name="flat"),
+        # Dropout: aucun poids, retire a l'inference -> invisible pour le
+        # TFLite, les .mem et le RTL
+        layers.Dropout(0.3, name="drop1"),
         layers.Dense(32, activation='relu', name="dense1"),
         # pas d'activation: dense2 sort les logits bruts, comme le RTL
         # (clamp_min=-128) et le protocole SPI (24 logits int8); le softmax
         # vit dans la loss (from_logits=True), argmax cote hote
-        layers.Dense(24, name="dense2")
+        layers.Dense(len(LETTERS), name="dense2")
     ], name="asl_cnn")
 
     model.compile(optimizer='adam',
@@ -79,46 +172,66 @@ def build_model(xtr, ytr, xte, yte):
                   metrics=['accuracy'])
 
     print("start model training...")
-
-    model.fit(xtr, ytr, epochs=20, batch_size=128, validation_data=(xte, yte))
+    flow = make_augmenter().flow(xtr.astype("float32"), ytr,
+                                 batch_size=BATCH, seed=SEED)
+    model.fit(flow, epochs=EPOCHS, validation_data=(xva / 255.0, yva))
     print("model training completed")
-     
+
     return model
 
 
 # Simulation quantization aware training (QAT) du modele CNN avec Keras
-# non necessaire puisque accuracy presque meme que le modele original, mais utile pour la quantization post-training
-def quant_aware_model(model, xtr, ytr, xte, yte):
+def quant_aware_model(model, xtr, ytr, xva, yva):
     quantize_model = tfmot.quantization.keras.quantize_model
     q_aware_model = quantize_model(model)
-    q_aware_model.compile(optimizer='adam',
+    # lr reduit: le QAT est un fine-tune, le lr Adam par defaut (1e-3)
+    # peut eloigner le modele de l'optimum float
+    q_aware_model.compile(optimizer=keras.optimizers.Adam(1e-4),
                           loss=keras.losses.CategoricalCrossentropy(from_logits=True),
                           metrics=['accuracy'])
     q_aware_model.summary()
-    
-    q_aware_model.fit(xtr, ytr, batch_size=BATCH, epochs=4, validation_data=(xte, yte))
+
+    flow = make_augmenter().flow(xtr.astype("float32"), ytr,
+                                 batch_size=BATCH, seed=SEED)
+    q_aware_model.fit(flow, epochs=QAT_EPOCHS, validation_data=(xva / 255.0, yva))
 
     return q_aware_model
 
-# Comparer les performances du modele original et du modele quantize-aware
-def compare_models(model, q_aware_model, xte, yte):
-    _, baseline_model_accuracy = model.evaluate(xte, yte, verbose=0)
-    _, q_aware_model_accuracy = q_aware_model.evaluate(xte, yte, verbose=0)
 
-    print('Baseline test accuracy:', baseline_model_accuracy)
-    print('Quant test accuracy:', q_aware_model_accuracy)
+# Comparer les performances du modele original et du modele quantize-aware
+def compare_models(model, q_aware_model, xva, yva):
+    _, baseline_model_accuracy = model.evaluate(xva / 255.0, yva, verbose=0)
+    _, q_aware_model_accuracy = q_aware_model.evaluate(xva / 255.0, yva, verbose=0)
+
+    print('Baseline val accuracy:', baseline_model_accuracy)
+    print('Quant val accuracy:', q_aware_model_accuracy)
+
 
 # Convertir le modele quantize-aware en TFLite avec quantization post-training
-def convert_to_tflite(model, filename):
+def convert_to_tflite(model, filename, x_calib):
     converter = tf.lite.TFLiteConverter.from_keras_model(model)
     converter.optimizations = [tf.lite.Optimize.DEFAULT]
     converter.inference_input_type = tf.int8
     converter.inference_output_type = tf.int8
+    # echec bruyant si un op n'est pas quantifiable int8 (plutot qu'un
+    # repli silencieux en float que le FPGA ne peut pas executer)
+    converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]
+
+    # exige par TFLITE_BUILTINS_INT8; pour un modele QAT les plages apprises
+    # priment, la calibration ne sert qu'aux tenseurs sans FakeQuant
+    def representative_dataset():
+        for i in range(0, min(300, len(x_calib))):
+            yield [x_calib[i:i + 1].astype(np.float32) / 255.0]
+    converter.representative_dataset = representative_dataset
+
     tflite_model = converter.convert()
     open(filename, 'wb').write(tflite_model)
     return tflite_model
 
-def evaluate_tflite_model(tflite_model, xte, yte):
+
+def evaluate_tflite_model(tflite_model, x, y_idx, name):
+    """x: uint8 (N,28,28,1), y_idx: indices 0-23. Meme quantification que
+    fpgaQuantize sur l'ESP32 (via scale/zp du modele)."""
     interpreter = tf.lite.Interpreter(model_content=tflite_model)
     interpreter.allocate_tensors()
 
@@ -126,32 +239,49 @@ def evaluate_tflite_model(tflite_model, xte, yte):
     output_index = interpreter.get_output_details()[0]
     in_scale, in_zero_point = input_index['quantization']
     in_dtype = input_index['dtype']
-   
+    info = np.iinfo(in_dtype)
+
     correct_predictions = 0
-    for i in range(len(xte)):
-        q = np.round(xte[i] / in_scale + in_zero_point)
-        info = np.iinfo(in_dtype)
+    for i in range(len(x)):
+        q = np.round(x[i] / 255.0 / in_scale + in_zero_point)
         q = np.clip(q, info.min, info.max).astype(in_dtype)
         interpreter.set_tensor(input_index['index'], q[np.newaxis, ...])
         interpreter.invoke()
         logits = interpreter.get_tensor(output_index['index'])[0]
-        if np.argmax(logits) == np.argmax(yte[i]):
+        if np.argmax(logits) == y_idx[i]:
             correct_predictions += 1
-    accuracy = correct_predictions / len(xte)
-    print("TFLite int8 model accuracy:", accuracy)
+    accuracy = correct_predictions / len(x)
+    print(f"TFLite int8 accuracy ({name}): {accuracy:.4f}")
+    return accuracy
 
 
-
-
-    
 def main():
-    os.makedirs(OUT, exist_ok=True)  # sinon open() crash apres 24 epochs
-    xtr, ytr, xte, yte = load_data()
-    model = build_model(xtr, ytr, xte, yte)
-    q_aware_model = quant_aware_model(model, xtr, ytr, xte, yte)
-    compare_models(model, q_aware_model, xte, yte)
-    tflite_model = convert_to_tflite(q_aware_model, os.path.join(OUT, "asl_cnn_qaware.tflite"))
-    evaluate_tflite_model(tflite_model, xte, yte)
+    os.makedirs(OUT, exist_ok=True)  # sinon open() crash apres l'entrainement
+    xtr, ytr, xva, yva = load_data()
+    model = build_model(xtr, ytr, xva, yva)
+    q_aware_model = quant_aware_model(model, xtr, ytr, xva, yva)
+    compare_models(model, q_aware_model, xva, yva)
+    tflite_model = convert_to_tflite(q_aware_model,
+                                     os.path.join(OUT, "asl_cnn_qaware.tflite"),
+                                     xtr)
+
+    yva_idx = np.argmax(yva, axis=1)
+    _, float_acc = model.evaluate(xva / 255.0, yva, verbose=0)
+    int8_acc = evaluate_tflite_model(tflite_model, xva, yva_idx,
+                                     "validation (meme dataset)")
+    if int8_acc < float_acc - 0.02:
+        print(f"ATTENTION: int8 {int8_acc:.3f} << float {float_acc:.3f}, "
+              f"la quantification perd de l'accuracy (revoir QAT/lr)")
+
+    # Le chiffre qui compte: photos d'un autre auteur, jamais vues.
+    # C'est lui qui predit l'accuracy devant la camera.
+    xod, yod = load_out_of_dataset()
+    evaluate_tflite_model(tflite_model, xod, yod, "hors-dataset")
+
+    print("\nProchaines etapes:")
+    print("  python scripts/export_params.py    # nouveaux .mem pour le FPGA")
+    print("  mettre a jour ESP32/PROJET_ESP32/golden_image.h (logits de l'auto-test)")
+
 
 if __name__ == "__main__":
     main()

@@ -12,31 +12,95 @@ import numpy as np
 from write_vh import print_vh
 from ai_edge_litert.interpreter import Interpreter  # meme API que tf.lite.Interpreter, nouvelle version
 
-# Indices des tenseurs dans asl_cnn_qaware.tflite: (entree, poids, biais, sortie) pour conv1, conv2, dense1, dense2.
-# Extrait de Netron.app
-# A verifier et modifier apres un retrain.
-LAYERS = [
-    (5,  6,  2, 7),    # conv1
-    (8,  9,  1, 10),   # conv2
-    (12, 13, 4, 14),   # dense1
-    (14, 15, 3, 16),   # dense2
+# Les indices des tenseurs changent a chaque conversion TFLite: on les
+# retrouve par leur forme, connue puisque l'architecture est figee
+# (28x28 -> conv 32x3x3 -> pool -> conv 64x3x3 -> pool -> dense 32 -> dense 24).
+# En cas d'ambiguite le script dump tous les tenseurs et s'arrete: remplir
+# alors LAYERS_OVERRIDE a la main (via Netron.app) comme avant.
+LAYERS_OVERRIDE = None  # ex: [(5, 6, 2, 7), (8, 9, 10, 11), ...]
+
+# (poids, entree, sortie) attendus par couche; None = entree/sortie du modele
+ARCH = [
+    ("conv1",  (32, 3, 3, 1),  None,            (1, 26, 26, 32)),
+    ("conv2",  (64, 3, 3, 32), (1, 13, 13, 32), (1, 11, 11, 64)),
+    ("dense1", (32, 1600),     (1, 1600),       (1, 32)),
+    ("dense2", (24, 32),       (1, 32),         None),
 ]
+
+
+def dump_tensors(tensors):
+    for t in tensors:
+        qp = t['quantization_parameters']
+        print(t['index'], t['name'], tuple(t['shape']), t['dtype'].__name__,
+              f"scales:{len(qp['scales'])}")
+
+
+def find_unique(tensors, pred, what):
+    m = [t for t in tensors if pred(t)]
+    if len(m) != 1:
+        dump_tensors(tensors)
+        raise RuntimeError(f"{what}: {len(m)} candidats au lieu de 1 -- "
+                           f"remplir LAYERS_OVERRIDE avec les indices ci-dessus")
+    return m[0]
+
+
+def resolve_layers(interp, details):
+    io_in = interp.get_input_details()[0]['index']
+    io_out = interp.get_output_details()[0]['index']
+
+    resolved = []
+    for name, w_shape, in_shape, out_shape in ARCH:
+        w = find_unique(details,
+                        lambda t: t['dtype'] == np.int8
+                        and tuple(t['shape']) == w_shape,
+                        f"{name} poids {w_shape}")
+
+        def act(shape, io, what):
+            if shape is None:
+                return next(t for t in details if t['index'] == io)
+            return find_unique(details,
+                               lambda t: t['dtype'] == np.int8
+                               and tuple(t['shape']) == shape,
+                               f"{name} {what} {shape}")
+
+        t_in = act(in_shape, io_in, "entree")
+        t_out = act(out_shape, io_out, "sortie")
+
+        # le biais se reconnait a sa forme (C,) int32 ET a son echelle:
+        # s_bias = s_in * s_w par canal (spec de quantification TFLite).
+        # La forme seule est ambigue (biais conv1 et dense1: 32 tous les deux).
+        s_in = t_in['quantization_parameters']['scales'][0]
+        s_w = w['quantization_parameters']['scales']
+        n_out = w_shape[0]
+
+        def bias_match(t):
+            if t['dtype'] != np.int32 or tuple(t['shape']) != (n_out,):
+                return False
+            s_b = t['quantization_parameters']['scales']
+            if len(s_b) not in (1, n_out):
+                return False
+            return np.allclose(s_b, s_in * s_w, rtol=1e-3)
+
+        b = find_unique(details, bias_match, f"{name} biais ({n_out},)")
+        resolved.append((t_in['index'], w['index'], b['index'], t_out['index']))
+        print(f"  {name}: in={t_in['index']} w={w['index']} "
+              f"b={b['index']} out={t_out['index']}")
+    return resolved
 
 
 def extract():
     interp = Interpreter(model_path="training/final_export/asl_cnn_qaware.tflite")
     interp.allocate_tensors()
-    tensors = {t['index']: t for t in interp.get_tensor_details()}
+    details = interp.get_tensor_details()
+    tensors = {t['index']: t for t in details}
 
-    # debug print pour retrouver les indices apres un retrain:
-    # for t in tensors.values():
-    #     print(t['index'], t['name'], t['shape'], t['dtype'])
+    layer_idx = LAYERS_OVERRIDE or resolve_layers(interp, details)
 
     def q(i):
         return tensors[i]['quantization_parameters']
 
     layers = []
-    for i_in, i_w, i_b, i_out in LAYERS:
+    for i_in, i_w, i_b, i_out in layer_idx:
         l = {
             's_in':   q(i_in)['scales'][0],
             'zp_in':  int(q(i_in)['zero_points'][0]),
@@ -113,7 +177,10 @@ def quantize_multiplier(M):
     shift = -exp                       # convention right-shift determinee
     assert 0 < M < 1.0
     assert (1 << 30) <= q_fixed < (1 << 31), "multiplier non normalise"
-    assert 7 <= shift <= 12, f"shift {shift} hors plage verifiee du RTL"
+    assert 7 <= shift <= 12, (
+        f"shift {shift} hors plage verifiee du RTL: un retrain a change les "
+        f"echelles. Verifier round_shift dans requantize.v pour cette valeur "
+        f"(tb_conv_engine) puis elargir la plage ici.")
     return q_fixed, shift
 
 

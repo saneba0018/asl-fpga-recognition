@@ -88,7 +88,14 @@ module top_mock (
 
     // MISO en trois-etats hors transaction. Le PULLUP interne declare au XDC
     // tient la ligne au repos.
-    assign spi_miso = spi_cs_n ? 1'bz : miso_int;
+    reg spi_miso_mux;
+
+    always @(*) begin
+        if (spi_cs_n) spi_miso_mux = 1'bz;
+        else spi_miso_mux = miso_int;
+    end
+
+    assign spi_miso = spi_miso_mux;
 
     SPI_Slave #(.SPI_MODE(0)) u_spi (
         .i_Rst_L    (~rst),
@@ -171,11 +178,19 @@ module top_mock (
     //-------------------------------------------------------------------------
     always @(*) begin
         case (pattern)
-            8'h01:   result_rd_data = {3'b000, result_rd_addr};
-            8'h02:   result_rd_data = 8'hA0 + {3'b000, result_rd_addr};
-            8'h03:   result_rd_data = result_rd_addr[0] ? 8'hAA : 8'h55;
-            8'h04:   result_rd_data = (result_rd_addr == arg_sel[4:0])
-                                        ? 8'h7F : 8'h00;
+            8'h01: result_rd_data = {3'b000, result_rd_addr};
+            8'h02: result_rd_data = 8'hA0 + {3'b000, result_rd_addr};
+
+            8'h03: begin
+                if (result_rd_addr[0]) result_rd_data = 8'hAA;
+                else result_rd_data = 8'h55;
+            end
+
+            8'h04: begin
+                if (result_rd_addr == arg_sel[4:0]) result_rd_data = 8'h7F;
+                else result_rd_data = 8'h00;
+            end
+
             8'h05:   result_rd_data = infer_cnt + {3'b000, result_rd_addr};
             8'h06:   result_rd_data = CONST_VAL;
             default: result_rd_data = echo[result_rd_addr];
@@ -194,7 +209,12 @@ module top_mock (
     localparam [24:0] BUSY_SLOW = 25'd2_500_000;   // 208,3 ms a 12 MHz
     localparam [24:0] BUSY_FAST = 25'd240_000;     //  20,0 ms
 
-    wire [24:0] busy_target = (speed != 8'h00) ? BUSY_FAST : BUSY_SLOW;
+    reg [24:0] busy_target;
+
+    always @(*) begin
+        if (speed != 8'h00) busy_target = BUSY_FAST;
+        else busy_target = BUSY_SLOW;
+    end
 
     reg [24:0] busy_cnt;
 
