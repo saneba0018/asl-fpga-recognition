@@ -2,37 +2,21 @@
 
 # Auteur: Felix Ouimet
 #
-# Script pour entrainer un modele CNN pour la reconnaissance de l'alphabet en langue des signes (ASL) avec Keras et Tensorflow
-# Exporte le modele en TFLite avec quantization post-training pour l'utiliser sur un FPGA
-# Cree fichiers .mem pour importer dans Cmod A7-35T
+# Entraine un CNN de reconnaissance ASL (Keras/TensorFlow), l'exporte en
+# TFLite quantifie int8, pour generer les .mem du Cmod A7-35T.
 #
-# Dataset: ASL Alphabet (grassknoted), ~3000 vraies photos 200x200 par lettre.
-# Remplace Sign Language MNIST: ce dernier est genere par augmentation d'un
-# petit nombre d'originaux, et le modele qui l'apprend ne generalise pas
-# (88% sur son propre jeu de test, 5.7% sur de vraies photos). On garde les
-# 24 lettres statiques (pas de J/Z).
+# Dataset: ASL Alphabet (grassknoted), ~3000 vraies photos 200x200 par lettre,
+# 24 lettres statiques (pas de J/Z). Remplace Sign Language MNIST, qui ne
+# generalisait pas a de vraies photos malgre une bonne precision sur son
+# propre jeu de test.
 #
-# Points cles pour que l'entrainement colle au deploiement:
-# - meme pretraitement que l'ESP32: gris -> crop carre centre -> 28x28
-#   au plus proche voisin (crop_center_resize, copie de camera_preprocess.cpp)
-# - augmentation (rotation, translation, zoom, luminosite) pour la
-#   robustesse au cadrage et a l'eclairage de la camera
-# - PAS de miroir horizontal: l'ASL est chirale, un M inverse n'est pas un M
-# - evaluation finale sur un jeu HORS dataset (danrasband/asl-alphabet-test,
-#   autre auteur, autre camera): c'est le seul chiffre qui predit la
-#   performance devant la vraie camera
+# Points cles: meme pretraitement que l'ESP32 (crop_center_resize, bit-exact
+# avec camera_preprocess.cpp) ; augmentation pour robustesse cadrage/eclairage ;
+# pas de miroir horizontal (ASL chirale) ; evaluation finale hors-dataset
+# (danrasband/asl-alphabet-test, autre auteur/camera).
 #
-# Apres un retrain: relancer export_params.py (nouveaux .mem). Note:
-# ESP32/PROJET_ESP32/golden_image.h contient les logits de reference de
-# l'auto-test au boot; il n'est plus regenerable automatiquement, donc
-# l'auto-test echouera avec les anciens logits tant qu'il n'est pas mis a jour.
-#
-# References:
-# https://www.tensorflow.org/model_optimization/guide/quantization/training_example
-# https://www.tensorflow.org/model_optimization/guide/quantization/post_training
-# https://www.tensorflow.org/lite/api_docs/python/tf/lite/Interpreter?hl=id
-# https://developers.google.com/edge/litert/conversion/tensorflow/quantization/post_training_integer_quant
-# https://victorzhou.com/blog/keras-cnn-tutorial/
+# Apres un retrain: relancer export_params.py, puis regenerer
+# ESP32/PROJET_ESP32/golden_image.h (logits de l'auto-test au boot).
 import os
 os.environ["TF_USE_LEGACY_KERAS"] = "1"
 os.environ["KERAS_BACKEND"] = "tensorflow"
@@ -62,11 +46,8 @@ EPOCHS, QAT_EPOCHS = 30, 6
 keras.utils.set_random_seed(SEED)
 
 
-# ---------------------------------------------------------------------------
-# Pretraitement: copie fidele de cropCenterAndResize (camera_preprocess.cpp).
-# Meme arithmetique entiere que le C, pour que le 28x28 vu a l'entrainement
-# soit identique bit a bit a celui produit par l'ESP32.
-# ---------------------------------------------------------------------------
+# Pretraitement: copie fidele de cropCenterAndResize (camera_preprocess.cpp),
+# meme arithmetique entiere, pour un 28x28 identique bit a bit a l'ESP32.
 
 def crop_center_resize(src):
     """Crop carre centre puis 28x28 au plus proche voisin."""

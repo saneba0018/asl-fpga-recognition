@@ -1,15 +1,7 @@
-// ROM de parametres Un module pour quatre instances:
-//   weights: WIDTH=8, DEPTH=70688, weights.mem (int8, tous layers concatenes)
-//   bias: WIDTH=32, DEPTH=152, bias.mem    (int32, channel global 0..151)
-//   mult: WIDTH=32, DEPTH=152, mult.mem    (Q31 m[output channel])
-//   shift: WIDTH=6, DEPTH=152, shift.mem   (right-shift, 7..12)
-// Lecture synchrone 1 cycle comme act_ram.
-//
-// MEMFILE est un nom de fichier nu, sans repertoire : les .mem sont ajoutes
-// au projet Vivado comme design sources, et $readmemh les resout alors par
-// leur nom. Un prefixe "mem/" ferait echouer la synthese (CRITICAL WARNING
-// Synth 8-4445) et les ROM seraient silencieusement optimisees a zero.
-// En simulation en ligne de commande, lancer depuis le repertoire mem/.
+// ROM de parametres, un module pour weights/bias/mult/shift (voir mem_streamer
+// pour les DEPTH/MEMFILE de chaque instance). Lecture synchrone 1 cycle.
+// MEMFILE doit rester un nom nu (sans "mem/") : Vivado resout les .mem par
+// nom comme design sources, un prefixe ferait echouer $readmemh en silence.
 
 module param_rom #(
     parameter WIDTH   = 8,
@@ -24,7 +16,9 @@ module param_rom #(
 
     reg [WIDTH-1:0] mem[0:DEPTH-1];
 
-    initial $readmemh(MEMFILE, mem);
+    // bornes explicites : evite l'avertissement quand MEMFILE > DEPTH (voulu
+    // pour la petite ROM conv1, qui ne lit que le debut de weights.mem).
+    initial $readmemh(MEMFILE, mem, 0, DEPTH - 1);
 
     always @(posedge clk) rdata <= mem[raddr];
 

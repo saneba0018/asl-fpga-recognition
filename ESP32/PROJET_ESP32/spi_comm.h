@@ -25,22 +25,44 @@
 // Trame de lecture : [CMD][donnees...]
 //
 // L'octet 0 transporte la commande. Le decodeur precharge le premier octet
-// de reponse des le decodage (drapeau r_preload), ~5 cycles a 12 MHz apres
+// de reponse des le decodage (drapeau r_preload), quelques cycles clk apres
 // le dernier front MONTANT de l'octet de commande. SPI_Slave fige l'octet
-// suivant au dernier front DESCENDANT du meme octet. A 1 MHz ces deux
-// instants ne sont separes que de ~80-170 ns : la course changeait de
-// vainqueur d'un bitstream a l'autre (apres un simple re-routage, logits
-// decales d'un rang, 23/24 divergents avec le dernier juste par accident).
+// suivant (r_TX_Shift <= r_TX_Byte) au dernier front DESCENDANT du meme
+// octet. Qui gagne cette course decide de l'alignement des donnees, et donc
+// de la valeur de cette constante :
 //
-// A SPI_HZ_READ = 250 kHz la fenetre passe a 2 us : le prechargement gagne
-// toujours, les donnees commencent a l'indice 1 sur n'importe quel build.
+//   prechargement gagne -> result[0] sur l'octet 1  -> OFFSET 1  (ce build)
+//   prechargement perd  -> result[0] sur l'octet 2  -> OFFSET 2
+//
+// Ce n'est pas le cablage qui tranche, mais le rapport R = f_clk / f_spi,
+// ou f_clk est l'horloge INTERNE du FPGA. Seuil mesure par balayage en
+// simulation (scripts de tb_race) : R <= 7 donne l'offset 2, R = 8 ne donne
+// AUCUN alignement valide, R >= 10 donne l'offset 1.
+//
+//   12 MHz / 1 MHz   R = 12   1,3x le seuil -> marginal. C'est l'historique :
+//                             la course changeait de vainqueur d'un bitstream
+//                             a l'autre, logits decales d'un rang, 23/24
+//                             divergents. D'ou le bridage a 250 kHz (R = 48).
+//   50 MHz / 1 MHz   R = 50   5,6x le seuil -> lectures pleine vitesse.
+//
+// mem_streamer.v porte desormais l'horloge interne a 50 MHz par MMCM, ce qui
+// rend l'offset 1 stable et permet de lire aussi vite qu'on ecrit.
 #define MISO_DATA_OFFSET  1
 
-// Ecritures (image, start) : MISO inutilise, aucune course -> pleine vitesse.
-// Lectures (logits, status) : ralenties pour fixer la course, cf. ci-dessus.
-// Cout : 26 octets a 250 kHz = 0.8 ms par lecture, negligeable a 1 Hz.
-#define SPI_HZ_WRITE  1000000
-#define SPI_HZ_READ    250000
+// Une seule vitesse dans les deux sens.
+//
+// DEUX CONDITIONS AVANT DE MONTER PLUS HAUT :
+//   1. Garder R = f_clk / f_spi >= 30. A 50 MHz cela plafonne vers 1,7 MHz.
+//      Accelerer le SPI sans accelerer le MMCM ramene la course marginale.
+//   2. SCK est sur JA1 (G17), qui n'est pas une broche clock-capable : le
+//      .xdc doit y forcer CLOCK_DEDICATED_ROUTE FALSE et seul 1 MHz est
+//      valide sur ce routage generique. Au-dela, recabler SCK sur A16.
+//
+// ATTENTION : si le bitstream est synthetise avec NO_MMCM (horloge interne
+// laissee a 12 MHz), il FAUT ramener SPI_HZ_READ a 250000 -- sinon R tombe
+// a 12 et les logits reviennent decales d'un rang.
+#define SPI_HZ_WRITE  500000
+#define SPI_HZ_READ   250000
 
 extern const char FPGA_LETTERS[FPGA_NUM_CLASS + 1];
 

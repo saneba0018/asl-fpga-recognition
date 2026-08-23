@@ -6,47 +6,45 @@
 // LiteRT Specs https://developers.google.com/edge/litert/conversion/tensorflow/quantization/quantization_spec
 
 // module srdhm base sur Parra, D.; Escobar Sanabria,D.; Camargo, C. Appendix A1 et gemmlowp
-// full combinational logic
 // SaturatingRoundingDoublingHighMul
 // q = round(acc * m / 2^31) avec m = Q31, acc = int32, q = int32
 // (acc * m) est calculé en 64 bits, puis arrondi et trunc vers zéro pour obtenir le résultat final en 32 bits.
 // La saturation du cas a == b == INT32_MIN (Appendix A1 ligne 2) est omise :
 // m est toujours positif (2^30 <= m < 2^31, assert dans export_params.py), le cas est inatteignable.
+//
+// PIPELINE (2 etages) : la multiplication 32x32->64 combinatoire etait le
+// chemin critique du design a 50 MHz (cf. mem_streamer.v). acc/m n'ont pas
+// besoin de rester stables plus d'un cycle : conv_engine.v les tient
+// (acc via mac_unit, m via mult_r) exactement le temps que prend cet etage 1
+// pour les capturer, puis suit la latence via un registre a decalage sur
+// req_pending. Marge confortable meme pour la couche la plus serree
+// (conv1 : 9 cycles entre deux elements, latence totale 4 cycles).
+//
+//   etage 1 : prod_r <= acc * m           (registre en sortie du multiplieur)
+//   etage 2 : q      <= round(prod_r / 2^31)   (nudge + shift, registres)
 
 module srdhm (
-    input  wire signed [31:0] acc,  // int32 accumulator
-    input  wire signed [31:0] m,    // int32 Q31 multiplier
-    output wire signed [31:0] q     // round(acc * m / 2^31)
+    input  wire                clk,
+    input  wire signed [31:0]  acc,  // int32 accumulator
+    input  wire signed [31:0]  m,    // int32 Q31 multiplier
+    output reg  signed [31:0]  q     // round(acc * m / 2^31), 2 cycles de latence
 );
 
-    // produit exact
-    wire signed [63:0] prod = acc * m;
+    // etage 1 : produit exact, registre en sortie du multiplieur
+    reg signed [63:0] prod_r;
+    always @(posedge clk) prod_r <= acc * m;
 
-    // biais:: +2^30 si >=0 ; (1 - 2^30) si <0.
-    reg signed  [63:0] nudge;
-    always @* begin
-        if (prod >= 0) begin
-            nudge = 64'sd1073741824;  //  2^30
-        end else begin
-            nudge = -64'sd1073741823;  //  1 - 2^30
-        end
-    end
-
-    wire signed [63:0] s = prod + nudge;
+    // biais: +2^30 si >=0 ; (1 - 2^30) si <0.
+    wire signed [63:0] nudge = prod_r[63] ? -64'sd1073741823 : 64'sd1073741824;
+    wire signed [63:0] s = prod_r + nudge;
 
     // divise par 2^31:
     //   s >= 0 : shift == floor == trunc
     //   s <  0 : trunc = -((-s) >> 31)
-    reg signed  [63:0] q_ext;
-    always @* begin
-        if (s[63]) begin
-            q_ext = -((-s) >>> 31);
-        end else begin
-            q_ext = s >>> 31;
-        end
-    end
+    wire signed [63:0] q_ext = s[63] ? -((-s) >>> 31) : (s >>> 31);
 
-    assign q = q_ext[31:0];
+    // etage 2 : resultat final, registre
+    always @(posedge clk) q <= q_ext[31:0];
 
 endmodule
 
@@ -121,8 +119,15 @@ module relu_clamp (
 endmodule
 
 //requantize
+//
+// shift/zp_out/clamp_min sont combinatoires en aval de srdhm (q sort 2
+// cycles apres acc/m) : le contrat avec l'appelant est donc que shift/zp_out/
+// clamp_min restent stables au moins aussi longtemps que acc/m, cf.
+// conv_engine.v ou mult_r/shift_r/zp_out_r/clamp_min_r sont latches et tenus
+// jusqu'au prochain element (largement plus long que 2 cycles).
 
 module requantize (
+    input  wire                clk,
     input  wire signed [31:0] acc,
     input  wire signed [31:0] m,
     input  wire        [ 4:0] shift,
@@ -132,6 +137,7 @@ module requantize (
 );
     wire signed [31:0] q, r;
     srdhm u_srdhm (
+        .clk(clk),
         .acc(acc),
         .m  (m),
         .q  (q)

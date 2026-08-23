@@ -1,19 +1,8 @@
-//-----------------------------------------------------------------------------
-// PROJET_ESP32.ino - capture camera, inference sur FPGA, affichage de la lettre
-//
-// Au demarrage, un auto-test envoie une image de reference (golden_image.h)
-// et compare les 24 logits recus a ceux du modele TFLite. S'ils sont
-// identiques, toute la
-// chaine est prouvee sans dependre de la camera : SPI, decodeur, ROM de poids,
-// accelerateur. Un echec ici rend inutile tout diagnostic cote camera.
-//
-// Une page de debug (web_debug.h) montre la trame camera et le 28x28 envoye
-// au FPGA. Par defaut l'ESP cree son propre point d'acces : se connecter au
-// reseau "asl-fpga-debug" puis ouvrir http://192.168.4.1
-//
-// La boucle est non bloquante : le serveur web est servi en continu, une
-// inference est lancee toutes les FRAME_INTERVAL_MS.
-//-----------------------------------------------------------------------------
+// PROJET_ESP32.ino - capture camera, inference sur FPGA, affichage de la
+// lettre. Au demarrage, un auto-test compare les logits d'une image de
+// reference (golden_image.h) a ceux du modele TFLite pour prouver la chaine
+// SPI/FPGA sans dependre de la camera. Page de debug sur "asl-fpga-debug" /
+// http://192.168.4.1. La boucle est non bloquante.
 
 #include <Arduino.h>
 #include <NHD_US2066.h>
@@ -32,31 +21,25 @@
 // Glass "AW" (slim) : config SEG 0x00. Mettre 0x10 pour un modele "CW".
 #define OLED_SEG_CONFIG  0x00
 
-// Duree minimale d'affichage d'une lettre. L'inference tourne toujours a
-// FRAME_INTERVAL_MS pour la page de debug, mais l'ecran ne change pas plus
-// vite que ceci pour rester lisible.
+// Duree minimale d'affichage d'une lettre a l'ecran (voir oledShowLetter).
 #define OLED_HOLD_MS  3000
 
-// Apercu ASCII sur le port serie. Redondant avec la page de debug, garde a 0
-// sauf si le WiFi n'est pas disponible.
-#define SHOW_ASCII  0
-
-// Periode entre deux inferences. L'inference elle-meme prend ~209 ms.
-#define FRAME_INTERVAL_MS  1000
-
-// Toutes les N trames : etat du tas sur le port serie. Un "libre" qui
-// descend a chaque ligne = fuite memoire; stable puis gel = pilote bloque.
-#define HEAP_REPORT_FRAMES  10
+// Fenetre d'accumulation : les logits de toutes les inferences qui tiennent
+// dans cette duree sont sommes canal par canal, et la lettre retenue est
+// l'argmax de la somme plutot que celui d'une seule image. Plus robuste
+// qu'une inference isolee face au bruit d'une frame (flou, cadrage).
+#define WINDOW_MS  1000
 
 uint8_t image_28x28[FPGA_IMG_SIZE];
 uint8_t image_quantized[FPGA_IMG_SIZE];
 
 static uint8_t raw_frame[WEB_RAW_CAPACITY];
-static unsigned long lastFrame = 0;
 
-//-----------------------------------------------------------------------------
+static int32_t windowLogitSum[FPGA_NUM_CLASS];
+static int      windowFrames = 0;
+static unsigned long windowStart = 0;
+
 // Ecran OLED 2x16
-//-----------------------------------------------------------------------------
 
 // Ecrit une ligne complete : 16 caracteres, completee avec des espaces pour
 // effacer l'ancien contenu sans passer par un clear (0x01) qui fait clignoter.
@@ -95,9 +78,7 @@ static void oledShowLetter(char letter, int margin) {
   shownSince = millis();
 }
 
-//-----------------------------------------------------------------------------
 // Auto-test : image de reference -> logits attendus
-//-----------------------------------------------------------------------------
 static bool fpgaSelfTest() {
   int8_t logits[FPGA_NUM_CLASS];
 
@@ -159,9 +140,8 @@ static bool fpgaSelfTest() {
   return false;
 }
 
-//-----------------------------------------------------------------------------
-// Une capture + une inference
-//-----------------------------------------------------------------------------
+// Une capture + une inference, accumulee dans windowLogitSum (pas de
+// resultat ni d'affichage par frame : voir finishWindow).
 static void runOneFrame() {
   int rawW = 0;
   int rawH = 0;
@@ -172,14 +152,9 @@ static void runOneFrame() {
     return;
   }
 
-  // Publier l'image avant l'inference : meme si le FPGA ne repond pas, la
-  // page de debug montre ce que la camera a vu.
+  // Publier l'image tout de suite : meme si le FPGA ne repond pas, la page
+  // de debug montre ce que la camera a vu.
   webDebugSetFrames(raw_frame, rawW, rawH, image_28x28);
-
-#if SHOW_ASCII
-  printImageStats(image_28x28);
-  printAsciiImage(image_28x28);
-#endif
 
   // uint8 camera -> int8 attendu par le modele (scale 1/255, zero-point -128)
   fpgaQuantize(image_28x28, image_quantized, FPGA_IMG_SIZE);
@@ -190,34 +165,56 @@ static void runOneFrame() {
 
   if (!fpgaInferEx(image_quantized, &idx, &margin, logits)) {
     Serial.println("Erreur: inference echouee");
-    webDebugSetResult(NULL, 0, 0, false);
     return;
   }
 
-  webDebugSetResult(logits, idx, margin, true);
+  for (int i = 0; i < FPGA_NUM_CLASS; i++) {
+    windowLogitSum[i] += logits[i];
+  }
+  windowFrames++;
+}
 
-  Serial.print("Lettre: ");
-  Serial.print(FPGA_LETTERS[idx]);
+// Cloture la fenetre d'accumulation : argmax de la somme des logits sur
+// toutes les frames vues depuis windowStart, affichage OLED + page de debug,
+// puis remise a zero pour la fenetre suivante.
+static void finishWindow() {
+  if (windowFrames == 0) {
+    windowStart = millis();
+    return;
+  }
+
+  int best = 0;
+  int second = 0;
+
+  for (int i = 1; i < FPGA_NUM_CLASS; i++) {
+    if (windowLogitSum[i] > windowLogitSum[best]) {
+      second = best;
+      best = i;
+    } else if (i != best && windowLogitSum[i] > windowLogitSum[second]) {
+      second = i;
+    }
+  }
+
+  int32_t margin = windowLogitSum[best] - windowLogitSum[second];
+
+  Serial.print("Lettre (");
+  Serial.print(windowFrames);
+  Serial.print(" frames): ");
+  Serial.print(FPGA_LETTERS[best]);
   Serial.print("   marge: ");
   Serial.println(margin);
 
-  oledShowLetter(FPGA_LETTERS[idx], margin);
+  oledShowLetter(FPGA_LETTERS[best], margin);
+  webDebugSetWindowResult(windowLogitSum, windowFrames, best, margin);
 
-  static uint32_t frameNum = 0;
-
-  if (++frameNum % HEAP_REPORT_FRAMES == 0) {
-    Serial.printf("Tas: libre %u, plus bas %u, plus gros bloc %u\n",
-                  (unsigned)ESP.getFreeHeap(),
-                  (unsigned)ESP.getMinFreeHeap(),
-                  (unsigned)ESP.getMaxAllocHeap());
-  }
-
-  // La marge est un ecart de logits int8, pas une probabilite. Une marge
-  // faible signale une hesitation entre deux lettres, souvent un cadrage
-  // ou un eclairage qui s'ecarte du dataset.
-  if (margin < 10) {
+  // Marge moyenne par frame, meme seuil qu'avant le passage a la somme.
+  if (margin / windowFrames < 10) {
     Serial.println("Marge faible, prediction peu fiable");
   }
+
+  memset(windowLogitSum, 0, sizeof(windowLogitSum));
+  windowFrames = 0;
+  windowStart = millis();
 }
 
 void setup() {
@@ -238,15 +235,18 @@ void setup() {
 
   oledWriteLine(1, fpgaSelfTest() ? "auto-test OK" : "auto-test ECHEC");
 
+  windowStart = millis();
+
   Serial.println("System ready");
 }
 
 void loop() {
-  // Servi en continu : la page reste reactive entre deux inferences
+  // Servi en continu : la page reste reactive pendant l'accumulation
   webDebugHandle();
 
-  if (millis() - lastFrame >= FRAME_INTERVAL_MS) {
-    lastFrame = millis();
-    runOneFrame();
+  runOneFrame();
+
+  if (millis() - windowStart >= WINDOW_MS) {
+    finishWindow();
   }
 }

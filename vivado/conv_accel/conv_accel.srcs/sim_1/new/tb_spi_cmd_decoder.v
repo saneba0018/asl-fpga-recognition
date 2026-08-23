@@ -1,15 +1,7 @@
 `timescale 1ns/1ps
-//-----------------------------------------------------------------------------
-// tb_spi_cmd_decoder - banc de test avec verifications automatiques
-//
-// TEST 1 : START_CONV genere un pulse start
-// TEST 2 : SEND_IMAGE ecrit les octets aux bonnes adresses
-// TEST 3 : GET_STATUS emet {busy, done_latch, 6'b0}
-// TEST 4 : READ_RESULT emet les 24 logits complets  <-- detecte le bug du 24e
-// TEST 5 : START_CONV est ignore pendant busy
-//
-// Verdict automatique en fin de simulation. Watchdog integre.
-//-----------------------------------------------------------------------------
+// tb_spi_cmd_decoder - verifie START_CONV, SEND_IMAGE, GET_STATUS,
+// READ_RESULT (24 logits complets) et le blocage de START_CONV pendant busy.
+// Verdict automatique + watchdog.
 
 module tb_spi_cmd_decoder;
 
@@ -49,9 +41,7 @@ module tb_spi_cmd_decoder;
         .o_ready(o_ready)
     );
 
-    //-------------------------------------------------------------------------
     // Mouchards : capturent ce que le DUT produit, pour verification differee
-    //-------------------------------------------------------------------------
     reg        cap_en   = 0;
     integer    n_tx     = 0;      // nombre d'octets emis
     reg [7:0]  tx_log [0:63];     // octets emis
@@ -94,9 +84,7 @@ module tb_spi_cmd_decoder;
         end
     endtask
 
-    //-------------------------------------------------------------------------
     // Stimuli
-    //-------------------------------------------------------------------------
     task send_byte(input [7:0] b);
         begin
             @(posedge clk); rx_byte <= b; rx_dv <= 1;
@@ -113,9 +101,7 @@ module tb_spi_cmd_decoder;
         end
     endtask
 
-    //-------------------------------------------------------------------------
     // Watchdog : evite une simulation qui tourne indefiniment
-    //-------------------------------------------------------------------------
     initial begin
         #200000;
         $display("");
@@ -124,9 +110,7 @@ module tb_spi_cmd_decoder;
         $finish;
     end
 
-    //-------------------------------------------------------------------------
     // Scenario
-    //-------------------------------------------------------------------------
     integer i;
 
     initial begin
@@ -227,14 +211,5 @@ module tb_spi_cmd_decoder;
 
 endmodule
 
-//-----------------------------------------------------------------------------
-// NOTE POUR L'IMPLEMENTATION DE result_buf
-//
-// Le decodeur lit result_rd_data dans le MEME cycle ou il positionne
-// result_rd_addr. result_buf doit donc etre COMBINATOIRE (banc de registres),
-// pas une BRAM a lecture synchrone comme act_ram.
-//
-// Avec une lecture synchrone, tous les logits sortiraient decales d'un cran
-// et le 24e manquerait a nouveau. Pour 24 octets, un banc de registres est
-// de toute facon le bon choix.
-//-----------------------------------------------------------------------------
+// Note: result_buf doit etre combinatoire (banc de registres), pas une BRAM
+// synchrone comme act_ram, sinon les logits sortiraient decales d'un cran.

@@ -9,11 +9,11 @@
 #define OUT_H 28
 
 void setupCamera();
-bool captureAndPreprocess(uint8_t *out);
 
-// Variante pour le debug web : recopie aussi la trame brute avant reduction.
-// raw peut etre NULL. Si la trame depasse rawCap, elle n'est pas recopiee et
-// *rawW / *rawH sont mis a 0, mais le 28x28 est produit quand meme.
+// Capture + reduction en 28x28. raw recoit une copie de la trame brute avant
+// reduction (pour la page de debug) et peut etre NULL. Si la trame depasse
+// rawCap, elle n'est pas recopiee et *rawW / *rawH sont mis a 0, mais le
+// 28x28 est produit quand meme.
 bool captureAndPreprocessEx(uint8_t *out, uint8_t *raw, size_t rawCap,
                             int *rawW, int *rawH);
 
@@ -33,13 +33,12 @@ bool getSensorVFlip();
 // Reduction par moyenne de bloc (box filter) : contrairement au plus proche
 // voisin qui jette ~17 pixels sur 18, chaque pixel source pese dans la
 // moyenne. Preserve les details fins (pouce des lettres poing A/E/M/N/S/T).
-// Bit-identique a crop_center_box de scripts/eval_fist.py.
 void setPreprocessBox(bool useBox);
 bool getPreprocessBox();
 
 // Etirement min-max du 28x28 apres reduction : enleve l'eclairage comme
-// variable. Bit-identique a contrast_minmax de scripts/eval_fist.py.
-// N'activer que si le modele a ete entraine avec (voir training_script.py).
+// variable. N'activer que si le modele a ete entraine avec (voir
+// training_script.py).
 void setContrastStretch(bool enable);
 bool getContrastStretch();
 
@@ -47,9 +46,5 @@ void resizeNearestNeighbor(camera_fb_t *fb, uint8_t *out);
 void cropCenterAndResize(camera_fb_t *fb, uint8_t *out);
 void cropCenterAndResizeBox(camera_fb_t *fb, uint8_t *out);
 void contrastStretch(uint8_t *img);
-
-void printAsciiImage(uint8_t *img);
-void printImageStats(uint8_t *img);
-void printPGMImage(uint8_t *img);
 
 #endif

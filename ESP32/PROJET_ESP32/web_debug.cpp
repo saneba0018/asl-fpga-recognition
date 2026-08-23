@@ -20,16 +20,15 @@ static uint8_t procMin = 0;
 static uint8_t procMax = 0;
 static uint8_t procMean = 0;
 
-static int8_t lastLogits[FPGA_NUM_CLASS];
-static int lastIdx = 0;
-static int lastMargin = 0;
-static bool lastValid = false;
+static int32_t lastLogitSum[FPGA_NUM_CLASS];
+static int     lastWindowFrames = 0;
+static int     lastIdx = 0;
+static int32_t lastMargin = 0;
+static bool    lastValid = false;
 
 static uint32_t frameCount = 0;
 
-//-----------------------------------------------------------------------------
 // Page
-//-----------------------------------------------------------------------------
 static const char INDEX_HTML[] PROGMEM = R"rawliteral(
 <!doctype html>
 <html lang="fr">
@@ -105,7 +104,7 @@ static const char INDEX_HTML[] PROGMEM = R"rawliteral(
   </div>
 
   <div class="card" style="min-width:320px">
-    <h2>Inference</h2>
+    <h2>Inference &mdash; somme sur 1 s</h2>
     <div class="letter" id="letter">&mdash;</div>
     <div class="meta" id="infmeta">aucun resultat</div>
     <div class="bars" id="bars"></div>
@@ -174,8 +173,10 @@ async function refresh() {
 
     if (info.valid) {
       letter.textContent = LETTERS[info.idx] || "?";
-      infmeta.innerHTML = "marge " + info.margin +
-        (info.margin < 10 ? " <span class='margin-lo'>(faible)</span>" : "");
+      const avgMargin = info.margin / info.frames;
+      infmeta.innerHTML = "marge " + info.margin + " sur " + info.frames +
+        " frames (moy. " + avgMargin.toFixed(1) + ")" +
+        (avgMargin < 10 ? " <span class='margin-lo'>(faible)</span>" : "");
       const bars = document.getElementById("bars");
       const labels = document.getElementById("barlabels");
       const lo = Math.min(...info.logits), hi = Math.max(...info.logits);
@@ -232,9 +233,7 @@ refresh();
 </html>
 )rawliteral";
 
-//-----------------------------------------------------------------------------
 // Handlers
-//-----------------------------------------------------------------------------
 static void handleRoot() {
   server.send_P(200, "text/html; charset=utf-8", INDEX_HTML);
 }
@@ -271,19 +270,19 @@ static void handleInfo() {
                       "{\"rawW\":%d,\"rawH\":%d,\"procValid\":%s,"
                       "\"min\":%u,\"max\":%u,\"mean\":%u,"
                       "\"crop\":%s,\"hmirror\":%s,\"vflip\":%s,"
-                      "\"frame\":%lu,\"valid\":%s,\"idx\":%d,\"margin\":%d,"
-                      "\"logits\":[",
+                      "\"frame\":%lu,\"valid\":%s,\"idx\":%d,\"margin\":%ld,"
+                      "\"frames\":%d,\"logits\":[",
                       rawWidth, rawHeight, procValid ? "true" : "false",
                       procMin, procMax, procMean,
                       getPreprocessCrop() ? "true" : "false",
                       getSensorHMirror() ? "true" : "false",
                       getSensorVFlip() ? "true" : "false",
                       (unsigned long)frameCount, lastValid ? "true" : "false",
-                      lastIdx, lastMargin);
+                      lastIdx, (long)lastMargin, lastWindowFrames);
 
   for (int i = 0; i < FPGA_NUM_CLASS && n < sizeof(j) - 8; i++) {
-    n += snprintf(j + n, sizeof(j) - n, "%s%d",
-                  (i > 0) ? "," : "", (int)lastLogits[i]);
+    n += snprintf(j + n, sizeof(j) - n, "%s%ld",
+                  (i > 0) ? "," : "", (long)lastLogitSum[i]);
   }
 
   snprintf(j + n, sizeof(j) - n, "]}");
@@ -307,9 +306,7 @@ static void handleMode() {
   server.send(200, "text/plain", "ok");
 }
 
-//-----------------------------------------------------------------------------
 // API
-//-----------------------------------------------------------------------------
 void webDebugBegin() {
 #if WEB_DEBUG_AP_MODE
   WiFi.mode(WIFI_AP);
@@ -404,12 +401,11 @@ void webDebugSetFrames(const uint8_t *raw, int rawW, int rawH,
   frameCount++;
 }
 
-void webDebugSetResult(const int8_t *logits, int idx, int margin, bool valid) {
-  if (logits != NULL) {
-    memcpy(lastLogits, logits, FPGA_NUM_CLASS);
-  }
-
+void webDebugSetWindowResult(const int32_t *logitSum, int nFrames, int idx,
+                             int32_t margin) {
+  memcpy(lastLogitSum, logitSum, sizeof(lastLogitSum));
+  lastWindowFrames = nFrames;
   lastIdx = idx;
   lastMargin = margin;
-  lastValid = valid;
+  lastValid = true;
 }

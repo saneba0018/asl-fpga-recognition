@@ -7,10 +7,15 @@
 # https://netron.app/ (visualiser le modele et retrouver les indices des tenseurs)
 
 import os
+import sys
 import math
 import numpy as np
 from write_vh import print_vh
 from ai_edge_litert.interpreter import Interpreter  # meme API que tf.lite.Interpreter, nouvelle version
+
+# chemin du .tflite: argv[1] si fourni (ex. training/final_export_28_maison/
+# asl_cnn_28_maison.tflite apres un retrain), sinon l'export par defaut
+TFLITE_PATH = sys.argv[1] if len(sys.argv) > 1 else "training/final_export/asl_cnn_qaware.tflite"
 
 # Les indices des tenseurs changent a chaque conversion TFLite: on les
 # retrouve par leur forme, connue puisque l'architecture est figee
@@ -89,7 +94,7 @@ def resolve_layers(interp, details):
 
 
 def extract():
-    interp = Interpreter(model_path="training/final_export/asl_cnn_qaware.tflite")
+    interp = Interpreter(model_path=TFLITE_PATH)
     interp.allocate_tensors()
     details = interp.get_tensor_details()
     tensors = {t['index']: t for t in details}
@@ -177,7 +182,13 @@ def quantize_multiplier(M):
     shift = -exp                       # convention right-shift determinee
     assert 0 < M < 1.0
     assert (1 << 30) <= q_fixed < (1 << 31), "multiplier non normalise"
-    assert 7 <= shift <= 12, (
+    # shift=13: 4 canaux de conv2 l'exigent depuis le retrain grassknoted+
+    # maison (quantification per-channel, canaux a faible variance de poids).
+    # round_shift/srdhm n'ont pas de cas particulier lie a la valeur de shift
+    # (juste un decalage generique sur 5 bits) ; verifie bit-exact contre 729
+    # vecteurs independants (extremes + ties + aleatoire) via iverilog avant
+    # d'elargir la plage de 12 a 13.
+    assert 7 <= shift <= 13, (
         f"shift {shift} hors plage verifiee du RTL: un retrain a change les "
         f"echelles. Verifier round_shift dans requantize.v pour cette valeur "
         f"(tb_conv_engine) puis elargir la plage ici.")

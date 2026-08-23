@@ -1,20 +1,8 @@
-//-----------------------------------------------------------------------------
-// web_debug.h - page web de diagnostic du pretraitement camera
-//
-// Sert une page qui affiche cote a cote la trame brute de la camera et le
-// 28x28 reellement envoye au FPGA, plus le resultat de l'inference. Sert a
-// repondre a la question qui bloque le plus souvent une chaine de vision :
-// est-ce le modele qui se trompe, ou l'image qui n'a rien a voir avec celles
-// du dataset ?
-//
-// Par defaut l'ESP cree son propre point d'acces, donc aucun routeur ni
-// identifiant n'est necessaire. Connecte-toi au reseau WEB_DEBUG_AP_SSID puis
-// ouvre http://192.168.4.1
-//
-// Pour rejoindre un reseau existant a la place, mettre WEB_DEBUG_AP_MODE a 0
-// et renseigner WIFI_SSID / WIFI_PASS. L'adresse obtenue est affichee sur le
-// port serie au demarrage.
-//-----------------------------------------------------------------------------
+// web_debug.h - page web de diagnostic : affiche cote a cote la trame brute
+// de la camera, le 28x28 envoye au FPGA et le resultat d'inference. Par
+// defaut l'ESP cree son propre point d'acces (WEB_DEBUG_AP_SSID,
+// http://192.168.4.1) ; mettre WEB_DEBUG_AP_MODE a 0 pour rejoindre un
+// reseau existant via WIFI_SSID/WIFI_PASS.
 
 #ifndef WEB_DEBUG_H
 #define WEB_DEBUG_H
@@ -40,7 +28,9 @@ void webDebugHandle();
 void webDebugSetFrames(const uint8_t *raw, int rawW, int rawH,
                        const uint8_t *proc);
 
-// Publie le dernier resultat d'inference. valid a false affiche "aucun".
-void webDebugSetResult(const int8_t *logits, int idx, int margin, bool valid);
+// Publie le resultat agrege sur la derniere fenetre d'accumulation : somme
+// des logits (24 canaux) sur nFrames images, argmax idx et sa marge.
+void webDebugSetWindowResult(const int32_t *logitSum, int nFrames, int idx,
+                             int32_t margin);
 
 #endif

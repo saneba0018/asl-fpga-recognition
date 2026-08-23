@@ -1,7 +1,5 @@
 #include "camera_preprocess.h"
 
-bool printPGM = false;
-
 // Crop carre centre par defaut : fidele au dataset (vignettes carrees).
 // Le mode plein cadre ecrase 160x120 en 28x28 et deforme la main de 25%.
 static bool useCropMode = true;
@@ -17,7 +15,7 @@ static bool useContrast = false;
 // L'ASL est chirale : une trame miroir ou inversee envoie chaque lettre
 // sur une autre avec une grande confiance. A valider une fois avec un L
 // de la main droite : pouce vers la gauche de l'image, index vers le haut.
-static bool useHMirror = false;
+static bool useHMirror = true;
 static bool useVFlip = false;
 
 void resizeNearestNeighbor(camera_fb_t *fb, uint8_t *out) {
@@ -56,7 +54,7 @@ void cropCenterAndResize(camera_fb_t *fb, uint8_t *out) {
 // divisions entieres que le plus proche voisin : les blocs pavent le crop
 // exactement, aucun pixel jete. Arrondi au plus proche ((sum + n/2) / n).
 // Cout : ~1 addition par pixel du crop (14k a QQVGA), negligeable.
-// Bit-identique a crop_center_box (scripts/eval_fist.py).
+// Le script d'entrainement doit appliquer la meme reduction (training_script.py).
 void cropCenterAndResizeBox(camera_fb_t *fb, uint8_t *out) {
   int srcW = fb->width;
   int srcH = fb->height;
@@ -91,7 +89,7 @@ void cropCenterAndResizeBox(camera_fb_t *fb, uint8_t *out) {
 
 // Etirement min-max en place : p' = (p - min) * 255 / (max - min), arrondi
 // au plus proche. Ne fait rien sur une image uniforme.
-// Bit-identique a contrast_minmax (scripts/eval_fist.py).
+// Le script d'entrainement doit appliquer le meme etirement (training_script.py).
 void contrastStretch(uint8_t *img) {
   uint8_t lo = 255;
   uint8_t hi = 0;
@@ -110,59 +108,6 @@ void contrastStretch(uint8_t *img) {
   for (int i = 0; i < OUT_W * OUT_H; i++) {
     img[i] = (uint8_t)(((img[i] - lo) * 255 + span / 2) / span);
   }
-}
-
-void printAsciiImage(uint8_t *img) {
-  const char levels[] = " .:-=+*#%@";
-
-  Serial.println("Image 28x28 ASCII:");
-
-  for (int y = 0; y < OUT_H; y++) {
-    for (int x = 0; x < OUT_W; x++) {
-      uint8_t pixel = img[y * OUT_W + x];
-      int index = map(pixel, 0, 255, 0, 9);
-      Serial.print(levels[index]);
-    }
-    Serial.println();
-  }
-}
-
-void printPGMImage(uint8_t *img) {
-  Serial.println("PGM_START");
-  Serial.println("P2");
-  Serial.println("28 28");
-  Serial.println("255");
-
-  for (int y = 0; y < OUT_H; y++) {
-    for (int x = 0; x < OUT_W; x++) {
-      Serial.print(img[y * OUT_W + x]);
-      Serial.print(" ");
-    }
-    Serial.println();
-  }
-
-  Serial.println("PGM_END");
-}
-
-void printImageStats(uint8_t *img) {
-  uint8_t minVal = 255;
-  uint8_t maxVal = 0;
-  long sumVal = 0;
-
-  for (int i = 0; i < OUT_W * OUT_H; i++) {
-    if (img[i] < minVal) minVal = img[i];
-    if (img[i] > maxVal) maxVal = img[i];
-    sumVal += img[i];
-  }
-
-  Serial.print("Min pixel: ");
-  Serial.println(minVal);
-
-  Serial.print("Max pixel: ");
-  Serial.println(maxVal);
-
-  Serial.print("Moyenne pixel: ");
-  Serial.println(sumVal / (OUT_W * OUT_H));
 }
 
 void setupCamera() {
@@ -331,13 +276,5 @@ bool captureAndPreprocessEx(uint8_t *out, uint8_t *raw, size_t rawCap,
 
   esp_camera_fb_return(fb);
 
-  if (printPGM) {
-    printPGMImage(out);
-  }
-
   return true;
-}
-
-bool captureAndPreprocess(uint8_t *out) {
-  return captureAndPreprocessEx(out, NULL, 0, NULL, NULL);
 }

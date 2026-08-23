@@ -2,6 +2,8 @@
 
 module tb_conv_engine;
 
+    localparam LANES = 32;
+
     reg clk = 0, rst = 1;
     reg s_valid = 0, s_first = 0, s_last = 0;
     reg signed [7:0] s_act = 0, s_w = 0;
@@ -11,12 +13,19 @@ module tb_conv_engine;
     wire r_valid;
     wire signed [7:0] r_data;
 
-    conv_engine dut (
+    // conv1-style : une seule voie active par salve (lane 0), le reste
+    // masque par s_lane_en -- meme comportement qu'un mac_unit serie.
+    wire [LANES*8-1:0] s_act_vec = {{(LANES-1){8'd0}}, s_act};
+    wire [LANES*8-1:0] s_w_vec   = {{(LANES-1){8'd0}}, s_w};
+    wire [LANES-1:0]   s_lane_en = {{(LANES-1){1'b0}}, 1'b1};
+
+    conv_engine #(.LANES(LANES)) dut (
         .clk(clk),
         .rst(rst),
         .s_valid(s_valid),
-        .s_act(s_act),
-        .s_w(s_w),
+        .s_act_vec(s_act_vec),
+        .s_w_vec(s_w_vec),
+        .s_lane_en(s_lane_en),
         .s_first(s_first),
         .s_last(s_last),
         .s_bias(s_bias),
@@ -68,7 +77,9 @@ module tb_conv_engine;
         @(negedge clk) s_valid = 0;
         s_last = 0;
 
-        repeat (5) @(negedge clk);
+        // requantize (srdhm pipeline 2 etages) porte r_valid a 4 cycles
+        // apres s_last ; marge large pour laisser sortir le 2e resultat.
+        repeat (10) @(negedge clk);
         $display("expected: -23 then -41");
         $finish;
     end

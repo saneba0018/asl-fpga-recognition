@@ -1,21 +1,9 @@
 // spi_cmd_decoder : decodeur de trame SPI pour l'accelerateur ASL
 //
-// CORRECTIF 2026-07-27 - prechargement de tx_byte
-// -----------------------------------------------------------------------
-// L'ancienne version chargeait tx_byte sur le rx_dv de l'octet de
-// turnaround. Trop tard : rx_dv traverse trois etages de synchronisation
-// dans SPI_Slave, puis le decodeur reagit, puis SPI_Slave enregistre
-// r_TX_Byte. Environ 5 cycles a 12 MHz.
-//
-// Or SPI_Slave verrouille le bit de poids fort de l'octet suivant sur le
-// DERNIER front SCK de l'octet courant (r_SPI_MISO_Bit <= r_TX_Byte[7]
-// quand le compteur reboucle). Le nouveau tx_byte arrivait donc apres.
-// Chaque octet emis portait le bit 7 du precedent.
-//
-// Correctif : armer tx_byte des le decodage de la commande, un octet plus
-// tot, via le drapeau r_preload. Le turnaround sert alors reellement a ce
-// pour quoi il existe.
-// -----------------------------------------------------------------------
+// tx_byte est precharge des le decodage de la commande (un octet en avance,
+// via preload_res/preload_stat) plutot que sur le rx_dv du turnaround : ce
+// dernier arrive trop tard face au dernier front SCK ou SPI_Slave verrouille
+// le bit de poids fort suivant, ce qui decalait chaque octet emis d'un bit.
 //
 // Protocole : [CMD(1)][DATA(N)], N implicite dans CMD
 //   0x02 SEND_IMAGE   : 784 octets vers act_ram
@@ -108,11 +96,8 @@ module spi_cmd_decoder (
             // done latche jusqu'a lecture
             if (done) done_latch <= 1;
 
-            //-----------------------------------------------------------------
-            // Prechargement : un cycle apres le decodage de la commande.
-            // result_rd_addr a ete positionne au cycle precedent, donc
-            // result_rd_data est valide ici (lecture combinatoire).
-            //-----------------------------------------------------------------
+            // Prechargement : result_rd_addr a ete positionne au cycle
+            // precedent, donc result_rd_data est deja valide ici.
             if (preload_res) begin
                 tx_byte        <= result_rd_data;   // result[0]
                 tx_dv          <= 1;
@@ -176,15 +161,8 @@ module spi_cmd_decoder (
                         state <= S_IGNORE;
                 end
 
-                //-------------------------------------------------------------
-                // Chaque rx_dv arme l'octet SUIVANT. result[0] a deja ete
+                // Chaque rx_dv arme l'octet suivant ; result[0] est deja
                 // arme par preload_res, donc on demarre a byte_cnt = 1.
-                //
-                // Trame : [CMD][turnaround][24 octets]
-                //   MISO octet 0 : indefini
-                //   MISO octet 1 : indefini (turnaround)
-                //   MISO octets 2..25 : result[0..23]
-                //-------------------------------------------------------------
                 S_TX_RESULT: if (rx_dv) begin
                     if (byte_cnt < RES_SIZE) begin
                         tx_byte        <= result_rd_data;
